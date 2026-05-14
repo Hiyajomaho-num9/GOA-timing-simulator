@@ -1,0 +1,25 @@
+{
+  "name": "goa-timing-simulator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "benchmark:engine": "node scripts/benchmark-engine.mjs",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "build:web": "tsc && vite build",
+    "dist:win": "npm run build:web && neu build --embed-resources --release",
+    "dist:lite": "npm run dist:win"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "typescript": "latest",
+    "vite": "latest",
+    "xlsx": "latest"
+  },
+  "description": "GOA timing waveform simulator",
+  "devDependencies": {
+    "@neutralinojs/neu": "^11.7.1"
+  }
+}

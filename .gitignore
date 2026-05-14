@@ -1,0 +1,40 @@
+# dependencies
+node_modules/
+
+# frontend / desktop build outputs
+dist/
+web-dist/
+bin/
+release/
+*.neu
+.storage/
+*.log
+
+# Rust build outputs
+engine-rs/target/
+
+# local agent / workflow state
+.agents/
+.codex/
+.trellis/
+
+# local datasets / panel vendor files / generated reports
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+*.zip
+archives/
+brainstorming.md
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

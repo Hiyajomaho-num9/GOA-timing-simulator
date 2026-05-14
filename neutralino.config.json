@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/neutralinojs/neutralinojs/main/schemas/neutralino.config.schema.json",
+  "applicationId": "com.goa.timing.simulator",
+  "version": "0.1.0",
+  "defaultMode": "window",
+  "port": 0,
+  "documentRoot": "/web-dist/",
+  "url": "/",
+  "enableServer": true,
+  "enableNativeAPI": false,
+  "tokenSecurity": "none",
+  "logging": {
+    "enabled": false,
+    "writeToLogFile": false
+  },
+  "nativeAllowList": [],
+  "modes": {
+    "window": {
+      "title": "GOA Timing Simulator",
+      "width": 1600,
+      "height": 980,
+      "minWidth": 1280,
+      "minHeight": 720,
+      "center": true,
+      "fullScreen": false,
+      "alwaysOnTop": false,
+      "enableInspector": false,
+      "borderless": false,
+      "maximize": false,
+      "hidden": false,
+      "resizable": true,
+      "exitProcessOnClose": true
+    }
+  },
+  "cli": {
+    "binaryName": "GOA-Timing-Simulator",
+    "resourcesPath": "/web-dist/",
+    "extensionsPath": "/extensions/",
+    "binaryVersion": "6.7.0",
+    "clientVersion": "6.7.0"
+  }
+}
