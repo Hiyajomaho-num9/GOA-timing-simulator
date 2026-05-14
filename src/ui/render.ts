@@ -11,6 +11,14 @@ type EkInputKey = keyof Ek86707aInputs;
 type ImlInputKey = keyof Iml7272bConfig['inputs'];
 type LevelInputKey = EkInputKey | ImlInputKey;
 type LevelInputModel = 'ek' | 'iml';
+type DragState =
+  | { mode: 'pan'; x: number; start: number; end: number }
+  | { mode: 'edge'; x: number; edge: Edge; target: DraggableEdgeTarget; originAt: number; previewAt: number };
+type DraggableEdgeTarget = {
+  gpo: GpoConfig;
+  entry: GpoConfig['entries'][number];
+  periodStart: number;
+};
 const EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2', 'rst', 'pol'];
 const DUAL_EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2', 'ter', 'rst', 'pol'];
 const IML_INPUT_KEYS: ImlInputKey[] = ['stvIn1', 'stvIn2', 'clkIn1', 'clkIn2', 'lcIn', 'terminate'];
@@ -32,7 +40,7 @@ const state: {
   hoverEdge?: Edge;
   cursorPoint?: Edge;
   hitMap?: WaveformHitMap;
-  drag?: { x: number; start: number; end: number };
+  drag?: DragState;
   dragMoved: boolean;
   snapEnabled: boolean;
   snapRadius: number;
@@ -113,7 +121,7 @@ function layout(): string {
             <div class="measureAssist">
               <label class="check"><input id="snapToggle" type="checkbox" checked /> 边沿吸附</label>
               <label>吸附半径 <input id="snapRadius" type="number" min="3" max="80" value="14" /></label>
-              <div id="edgeCursor" class="edgeCursor">悬停到边沿附近后点击选择起点</div>
+              <div id="edgeCursor" class="edgeCursor">悬停到边沿附近：点击测量，按住拖动生成 patch suggestion</div>
             </div>
             <div class="extraSignals">
               <label>额外 GPO 波形<select id="extraSignalSelect"></select></label>
@@ -247,17 +255,30 @@ function bindStaticEvents(root: HTMLElement): void {
   }, { passive: false });
   canvas?.addEventListener('mousedown', (event) => {
     if (!state.view) return;
-    state.drag = { x: event.clientX, start: state.view.start, end: state.view.end };
+    const edge = state.snapEnabled ? nearestEdge(event.offsetX, event.offsetY, state.snapRadius) : undefined;
+    const target = edge ? draggableEdgeTarget(edge) : undefined;
+    state.drag = edge && target
+      ? { mode: 'edge', x: event.clientX, edge, target, originAt: edge.at, previewAt: edge.at }
+      : { mode: 'pan', x: event.clientX, start: state.view.start, end: state.view.end };
     state.dragMoved = false;
   });
-  window.addEventListener('mouseup', () => { state.drag = undefined; });
+  window.addEventListener('mouseup', () => {
+    if (state.drag?.mode === 'edge' && state.dragMoved) applyEdgeDragPatch(root, state.drag);
+    state.drag = undefined;
+  });
   window.addEventListener('mousemove', (event) => {
     if (!state.drag || !state.hitMap || !state.project.timing) return;
-    const span = state.drag.end - state.drag.start;
+    const span = state.hitMap.view.end - state.hitMap.view.start;
     const dx = event.clientX - state.drag.x;
     if (Math.abs(dx) > 3) state.dragMoved = true;
-    const delta = Math.round(-(dx / state.hitMap.plotWidth) * span);
-    setView(state.drag.start + delta, state.drag.end + delta);
+    const delta = Math.round((dx / state.hitMap.plotWidth) * span);
+    if (state.drag.mode === 'edge') {
+      state.drag.previewAt = clampAbsPcnt(state.drag.originAt + delta);
+      state.message = edgeDragPreviewText(state.drag);
+      renderEdgeCursor(root);
+    } else {
+      setView(state.drag.start - delta, state.drag.end - delta);
+    }
     draw(root);
   });
   canvas?.addEventListener('mousemove', (event) => {
@@ -452,8 +473,13 @@ function renderEdgeCursor(root: HTMLElement): void {
   const target = root.querySelector('#edgeCursor');
   if (!target) return;
   const nextRole = !state.selectedStartEdge || state.selectedEndEdge ? '起点' : '终点';
+  if (state.drag?.mode === 'edge' && state.project.timing) {
+    target.textContent = edgeDragPreviewText(state.drag);
+    target.className = 'edgeCursor active editing';
+    return;
+  }
   if (!state.hoverEdge && !state.cursorPoint) {
-    target.textContent = state.snapEnabled ? `等待吸附边沿：下一次点击设为${nextRole}` : `吸附关闭：移动到波形上，会出现竖光标；点击任意点作为${nextRole}`;
+    target.textContent = state.snapEnabled ? `等待吸附边沿：点击设为${nextRole}；按住边沿拖动生成 patch` : `吸附关闭：移动到波形上，会出现竖光标；点击任意点作为${nextRole}`;
     target.className = 'edgeCursor';
     return;
   }
@@ -462,8 +488,11 @@ function renderEdgeCursor(root: HTMLElement): void {
     target.className = 'edgeCursor active';
     return;
   }
-  target.textContent = `已吸附 ${edgeLabel(state.hoverEdge)}，点击设为${nextRole}`;
-  target.className = 'edgeCursor active';
+  const draggable = state.hoverEdge ? draggableEdgeTarget(state.hoverEdge) : undefined;
+  target.textContent = draggable
+    ? `已吸附 ${edgeLabel(state.hoverEdge)}；${edgePatchPath(draggable)}；点击设为${nextRole}，按住横向拖动改这些 cell`
+    : `已吸附 ${edgeLabel(state.hoverEdge)}，点击设为${nextRole}；此边沿不能直接生成 patch`;
+  target.className = `edgeCursor active ${draggable ? 'editable' : ''}`;
 }
 
 function renderTabs(root: HTMLElement): void {
@@ -516,23 +545,35 @@ function levelPanel(): string {
     ${header}
     ${mt9603Tp}
     <section class="panelSection">
-      <h3>${isDualEk ? '双 EK86707A 共用参数' : '单 EK86707A 参数'}</h3>
-      <div class="formGrid">
-        <label>SET1 / CK 输出路
-          <select data-ls="set1">
-            <option value="high">HIGH = 8CK</option>
-            <option value="float">FLOAT = 4CK</option>
-            <option value="gnd">GND = 6CK</option>
-          </select>
-        </label>
-        ${checkbox('set2', 'SET2', ls.set2)}
-        ${checkbox('set3', 'SET3', ls.set3)}
-        ${checkbox('dualSto', 'DualSTO', ls.dualSto)}
-        ${checkbox('ocpEnabled', 'OCP_EN', ls.ocpEnabled)}
-        <label>OCP_SEL <select data-ls="ocpSel"><option value="float">float</option><option value="0">0</option><option value="1">1</option></select></label>
-        <label>MODE1 <select data-ls="mode1"><option value="extra-high">extra high</option><option value="high">high</option><option value="normal">normal</option></select></label>
-        <label>MODE2 <select data-ls="mode2"><option value="0">0</option><option value="1">1</option></select></label>
-        <label>当前 CK 输出 <input value="${ek86707aSet1OutputCount(ls.set1) * (isDualEk ? 2 : 1)} 路" disabled /></label>
+      <div class="sectionHead">
+        <h3>${isDualEk ? '双 EK86707A 共用参数' : '单 EK86707A 参数'}</h3>
+        <span class="sectionMeta">统一按 pin / mode value 调参，配置共用到 CK preview</span>
+      </div>
+      <div class="ekParamGrid">
+        ${ekParamSelect('set1', 'SET1 / CK 输出路', ls.set1, [
+          ['high', 'HIGH / 8CK'],
+          ['float', 'FLOAT / 4CK'],
+          ['gnd', 'GND / 6CK'],
+        ], ekParamMeta('set1', ls, isDualEk))}
+        ${ekParamSelect('set2', 'SET2 / CK 间隔', String(ls.set2), boolOptions('LOW/FLOAT / 无间隔', 'HIGH / 有间隔'), ekParamMeta('set2', ls, isDualEk))}
+        ${ekParamSelect('set3', 'SET3 / 2D-3D 细分', String(ls.set3), boolOptions('LOW / 0', 'HIGH / 1'), ekParamMeta('set3', ls, isDualEk))}
+        ${ekParamSelect('dualSto', 'Disa_DualSTO / STO2', String(ls.dualSto), boolOptions('LOW / STO2跟随STI2', 'HIGH / STO2保持VGL1'), ekParamMeta('dualSto', ls, isDualEk))}
+        ${ekParamSelect('ocpEnabled', 'OCP_DIS / OCP保护', String(ls.ocpEnabled), boolOptions('LOW/FLOAT / OCP启用', 'HIGH / OCP关闭'), ekParamMeta('ocpEnabled', ls, isDualEk))}
+        ${ekParamSelect('ocpSel', 'OCP_SEL', ls.ocpSel, [
+          ['float', 'FLOAT / 110mA 单输入'],
+          ['0', 'GND / 180mA 单输入'],
+          ['1', 'HIGH / CKI1+CKI2 二输入'],
+        ], ekParamMeta('ocpSel', ls, isDualEk))}
+        ${ekParamSelect('mode1', 'MODE1 / Pre-charge', ls.mode1, [
+          ['extra-high', 'Extra High / 3-line pre-charge'],
+          ['high', 'High / 1-line pre-charge'],
+          ['normal', 'Middle / no pre-charge'],
+          ['low', 'Low / 2-line pre-charge'],
+        ], ekParamMeta('mode1', ls, isDualEk))}
+        ${ekParamSelect('mode2', 'MODE2 / 1-2-4 line on', ls.mode2, [
+          ['0', 'LOW / 强制1-line normal'],
+          ['1', 'HIGH / 跟SET3决定2/4-line'],
+        ], ekParamMeta('mode2', ls, isDualEk))}
       </div>
     </section>
     <section class="panelSection">
@@ -809,16 +850,87 @@ function imlOptions(options: Array<[number, string]>, selected: number): string 
   return options.map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${htmlText(label)}</option>`).join('');
 }
 
+function boolOptions(lowLabel: string, highLabel: string): Array<[string, string]> {
+  return [['false', lowLabel], ['true', highLabel]];
+}
+
+function ekParamSelect(key: keyof Ek86707aConfig, label: string, value: string, options: Array<[string, string]>, meta: string): string {
+  return `<label class="ekParamCard">
+    <span>${htmlText(label)}</span>
+    <select data-ls="${htmlAttr(String(key))}">
+      ${options.map(([optionValue, optionLabel]) => `<option value="${htmlAttr(optionValue)}" ${String(value) === optionValue ? 'selected' : ''}>${htmlText(optionLabel)}</option>`).join('')}
+    </select>
+    <small>${htmlText(meta)}</small>
+  </label>`;
+}
+
+function ekParamMeta(key: keyof Ek86707aConfig, ls: Ek86707aConfig | DualEk86707aConfig, isDualEk: boolean): string {
+  const twoInput = ls.ocpSel === '1';
+  switch (key) {
+    case 'set1':
+      return `raw=${ekSet1RawLabel(ls.set1)}；相位数=${ek86707aSet1OutputCount(ls.set1)}，当前预览输出=${ek86707aSet1OutputCount(ls.set1) * (isDualEk ? 2 : 1)}路`;
+    case 'set2':
+      return twoInput
+        ? `raw=${boolRawLabel(ls.set2)}；二输入模式下PDF说明SET2 disabled，预览暂忽略`
+        : `raw=${boolRawLabel(ls.set2)}；${ls.set2 ? 'CKO之间插入time interval' : 'CKO之间无time interval'}`;
+    case 'set3':
+      return `raw=${boolRawLabel(ls.set3)}；${ekLineOnMode(ls)}；由MODE2+SET3组合决定`;
+    case 'dualSto':
+      return `raw=${boolRawLabel(ls.dualSto)}；${ls.dualSto ? 'STO1跟STI1，STO2保持VGL1' : 'STO1跟STI1，STO2跟STI2'}`;
+    case 'ocpEnabled':
+      return `raw=${boolRawLabel(ls.ocpEnabled)}；${ls.ocpEnabled ? 'OCP关闭' : 'OCP启用'}，保护动作不参与波形仿真`;
+    case 'ocpSel':
+      return ls.ocpSel === '1'
+        ? 'raw=HIGH；Terminate脚复用CKI2，CPV1/CPV2二输入生成CK'
+        : ls.ocpSel === '0'
+          ? 'raw=GND；单输入，OCP阈值约180mA，CPV2按TER判定'
+          : 'raw=FLOAT；单输入，OCP阈值约110mA，CPV2按TER判定';
+    case 'mode1':
+      return twoInput
+        ? `raw=${ekMode1RawLabel(ls.mode1)}；二输入模式下PDF说明Mode1 disabled，预览暂忽略`
+        : `raw=${ekMode1RawLabel(ls.mode1)}；${ekMode1Meaning(ls.mode1)}`;
+    case 'mode2':
+      return `raw=${ls.mode2}; ${ls.mode2 === '0' ? '强制1-line normal，SET3不改变line-on' : '允许SET3选择2-line/4-line'}`;
+    default:
+      return '';
+  }
+}
+
+function boolRawLabel(value: boolean): string {
+  return value ? 'HIGH/1' : 'LOW/0';
+}
+
+function ekSet1RawLabel(value: EkSet1Level): string {
+  if (value === 'high') return 'HIGH';
+  if (value === 'float') return 'FLOAT';
+  return 'GND';
+}
+
+function ekMode1RawLabel(value: Ek86707aConfig['mode1']): string {
+  if (value === 'extra-high') return 'ExtraHigh(3~4V)';
+  if (value === 'high') return 'High(1.5~2.5V)';
+  if (value === 'normal') return 'Middle(0.9~1.4V)';
+  return 'Low(0~0.8V)';
+}
+
+function ekMode1Meaning(value: Ek86707aConfig['mode1']): string {
+  if (value === 'extra-high') return '3-line pre-charge';
+  if (value === 'high') return '1-line pre-charge';
+  if (value === 'normal') return 'no pre-charge';
+  return '2-line pre-charge';
+}
+
+function ekLineOnMode(ls: Ek86707aConfig | DualEk86707aConfig): string {
+  if (ls.mode2 === '0') return '当前=1-line on normal';
+  return ls.set3 ? '当前=2-line on' : '当前=4-line on';
+}
+
 function hexByte(value: number): string {
   return `0x${clampByte(value).toString(16).toUpperCase().padStart(2, '0')}`;
 }
 
 function clampByte(value: number): number {
   return Math.max(0, Math.min(255, Math.round(Number.isFinite(value) ? value : 0)));
-}
-
-function checkbox(key: string, label: string, checked: boolean): string {
-  return `<label class="check"><input data-ls="${key}" type="checkbox" ${checked ? 'checked' : ''}/> ${label}</label>`;
 }
 
 function gpioPanel(): string {
@@ -936,7 +1048,7 @@ function bindPanelEvents(root: HTMLElement): void {
     input.addEventListener('change', () => {
       if (!isEkConfig(state.project.levelShifter)) return;
       const current = state.project.levelShifter as unknown as Record<string, unknown>;
-      current[key] = input instanceof HTMLInputElement && input.type === 'checkbox' ? input.checked : input instanceof HTMLInputElement && input.type === 'number' ? Number(input.value) : input.value;
+      current[key] = parseEkParamValue(key, input.value);
       if (key === 'set1') current.outputCount = ek86707aSet1OutputCount(current.set1 as EkSet1Level);
       markDirty(root);
     });
@@ -1028,6 +1140,11 @@ function updateImlReg(root: HTMLElement, input: HTMLInputElement): void {
   const key = input.dataset.imlReg as keyof Pick<Iml7272bConfig, 'reg01' | 'reg02' | 'reg03' | 'reg04'>;
   state.project.levelShifter[key] = parseByte(input.value, state.project.levelShifter[key]);
   markDirty(root);
+}
+
+function parseEkParamValue(key: keyof Ek86707aConfig, value: string): unknown {
+  if (key === 'set2' || key === 'set3' || key === 'dualSto' || key === 'ocpEnabled') return value === 'true';
+  return value;
 }
 
 function updateImlField(root: HTMLElement, select: HTMLSelectElement): void {
@@ -1133,6 +1250,69 @@ function updateEntry(root: HTMLElement, input: HTMLInputElement): void {
   }
   addPatch(gpo, field, entry.index, oldValue, newValue);
   markDirty(root);
+}
+
+function applyEdgeDragPatch(root: HTMLElement, drag: Extract<DragState, { mode: 'edge' }>): void {
+  const t = state.project.timing;
+  if (!t) return;
+  const { gpo, entry } = drag.target;
+  const { nextLcnt, nextPcnt } = edgeDragNextPosition(drag);
+  const oldLcnt = entry.lcnt;
+  const oldPcnt = entry.pcnt;
+  if (nextPcnt > t.pcntMax) {
+    state.message = `拖动结果 PCNT=${nextPcnt} 超过当前限制 ${t.pcntMax}，未生成 patch`;
+    render(root);
+    return;
+  }
+  if (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && nextLcnt !== entry.lcnt) {
+    state.message = 'by-line 模式不允许通过拖拽修改 LCNT；请只在同一行内横向移动 PCNT';
+    render(root);
+    return;
+  }
+  if (nextLcnt === oldLcnt && nextPcnt === oldPcnt) {
+    state.message = '拖动距离没有改变 entry 位置';
+    render(root);
+    return;
+  }
+  if (nextLcnt !== oldLcnt) {
+    entry.lcnt = nextLcnt;
+    addPatch(gpo, 'lcnt', entry.index, oldLcnt, nextLcnt);
+  }
+  if (nextPcnt !== oldPcnt) {
+    entry.pcnt = nextPcnt;
+    addPatch(gpo, 'pcnt', entry.index, oldPcnt, nextPcnt);
+  }
+  state.selectedGpo = gpo.index;
+  state.activeTab = 'gpio';
+  state.project.dirty = true;
+  state.message = `已生成 patch suggestion：${edgePatchPath(drag.target)}；${formatPcnt(drag.originAt, t.pcntPerLine)} → ${formatPcnt(drag.previewAt, t.pcntPerLine)}。点击“重新计算波形”后预览结果。`;
+  render(root);
+}
+
+function edgeDragNextPosition(drag: Extract<DragState, { mode: 'edge' }>): { nextLcnt: number; nextPcnt: number } {
+  const t = state.project.timing;
+  if (!t) return { nextLcnt: drag.target.entry.lcnt, nextPcnt: drag.target.entry.pcnt };
+  const nextAbsInPeriod = Math.max(0, drag.previewAt - drag.target.periodStart);
+  return {
+    nextLcnt: Math.floor(nextAbsInPeriod / t.pcntPerLine),
+    nextPcnt: nextAbsInPeriod % t.pcntPerLine,
+  };
+}
+
+function edgeDragPreviewText(drag: Extract<DragState, { mode: 'edge' }>): string {
+  const t = state.project.timing;
+  if (!t) return '';
+  const { nextLcnt, nextPcnt } = edgeDragNextPosition(drag);
+  const lcntChange = nextLcnt === drag.target.entry.lcnt ? '' : ` LCNT ${drag.target.entry.lcnt}->${nextLcnt}`;
+  const pcntChange = nextPcnt === drag.target.entry.pcnt ? '' : ` PCNT ${drag.target.entry.pcnt}->${nextPcnt}`;
+  return `${edgePatchPath(drag.target)}；${formatPcnt(drag.originAt, t.pcntPerLine)} → ${formatPcnt(drag.previewAt, t.pcntPerLine)}；将写${lcntChange || ''}${pcntChange || ''}；松开生成 patch suggestion`;
+}
+
+function edgePatchPath(target: DraggableEdgeTarget): string {
+  const entry = target.entry;
+  const lcntCell = entry.cells.lcnt?.address ?? '-';
+  const pcntCell = entry.cells.pcnt?.address ?? '-';
+  return `GPIO > ${target.gpo.group} > entry${entry.index} > LCNT ${lcntCell} / PCNT ${pcntCell}`;
 }
 
 function updateGpoField(root: HTMLElement, input: HTMLInputElement): void {
@@ -1279,6 +1459,35 @@ function viewTotalPcnt(): number {
   return t.pcntPerLine * t.vtotal * (state.viewMode === 'frame120' ? 120 : 1);
 }
 
+function clampAbsPcnt(at: number): number {
+  const total = viewTotalPcnt();
+  return Math.max(0, Math.min(total, Math.round(at)));
+}
+
+function draggableEdgeTarget(edge: Edge | undefined): DraggableEdgeTarget | undefined {
+  const t = state.project.timing;
+  if (!edge || !t || edge.gpoIndex === undefined || edge.edge === 'point') return undefined;
+  const gpo = state.project.gpos.find((item) => item.index === edge.gpoIndex);
+  if (!gpo) return undefined;
+  const total = viewTotalPcnt();
+  const periodTotal = gpo.repeatMode === 1
+    ? Math.max(1, gpo.repeatCount + 1) * t.pcntPerLine * t.vtotal
+    : Math.max(1, gpo.repeatCount + 1) * t.pcntPerLine;
+  const periodStart = Math.floor(edge.at / periodTotal) * periodTotal;
+  const edgeInPeriod = edge.at - periodStart;
+  let best: { entry: GpoConfig['entries'][number]; distance: number } | undefined;
+  for (const entry of gpo.entries.filter((item) => item.enabled && item.level === edge.level)) {
+    const entryAt = gpo.repeatMode === 1
+      ? entry.frameCount * t.pcntPerLine * t.vtotal + entry.lcnt * t.pcntPerLine + entry.pcnt
+      : entry.lcnt * t.pcntPerLine + entry.pcnt;
+    const distance = Math.abs(entryAt - edgeInPeriod);
+    if (distance <= 1 && (!best || distance < best.distance)) best = { entry, distance };
+  }
+  if (!best) return undefined;
+  if (periodStart + periodTotal > total + periodTotal) return undefined;
+  return { gpo, entry: best.entry, periodStart };
+}
+
 function nearestEdge(x: number, y: number, radius = 8): Edge | undefined {
   const hit = state.hitMap;
   if (!hit) return undefined;
@@ -1340,6 +1549,8 @@ function draw(root: HTMLElement): void {
     hoverEdgeId: state.hoverEdge?.id,
     cursorAt: state.snapEnabled ? undefined : state.cursorPoint?.at,
     cursorSignalName: state.cursorPoint?.signalName,
+    dragPreviewAt: state.drag?.mode === 'edge' ? state.drag.previewAt : undefined,
+    dragPreviewLabel: state.drag?.mode === 'edge' && state.project.timing ? `${state.drag.target.gpo.group} entry${state.drag.target.entry.index} ${formatPcnt(state.drag.previewAt, state.project.timing.pcntPerLine)}` : undefined,
     showPulseCount: state.viewMode === 'frame1' || state.viewMode === 'frame120',
     selectedStartEdgeId: state.selectedStartEdge,
     selectedEndEdgeId: state.selectedEndEdge,
@@ -1885,7 +2096,7 @@ function parseLevelShifterConfig(value: unknown): LevelShifterConfig | undefined
       dualSto: Boolean(source.dualSto ?? defaults.dualSto),
       ocpEnabled: Boolean(source.ocpEnabled ?? defaults.ocpEnabled),
       ocpSel: source.ocpSel === '0' || source.ocpSel === '1' || source.ocpSel === 'float' ? source.ocpSel : defaults.ocpSel,
-      mode1: source.mode1 === 'high' || source.mode1 === 'normal' || source.mode1 === 'extra-high' ? source.mode1 : defaults.mode1,
+      mode1: source.mode1 === 'high' || source.mode1 === 'normal' || source.mode1 === 'extra-high' || source.mode1 === 'low' ? source.mode1 : defaults.mode1,
       mode2: source.mode2 === '1' ? '1' : defaults.mode2,
       outputCount: ek86707aSet1OutputCount(set1),
       inputs: {

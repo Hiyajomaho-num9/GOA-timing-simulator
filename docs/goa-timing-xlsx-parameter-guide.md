@@ -208,13 +208,14 @@ iML7272B 输入由用户手动映射。
 
 | 参数 | 含义 |
 | --- | --- |
-| `SET1` | 输出路数：`high`=8CK，`float`=4CK，`gnd`=6CK。 |
-| `SET2` / `SET3` | 模式配置，后续扩展。 |
-| `DUALSTO` | STO 模式，保存但不参与 CK 生成。 |
-| `OCP_EN` | OCP 使能，保存但不模拟保护行为。 |
-| `OCP_SEL` | `1` 时进入 CPV1/CPV2 二进多出判定。 |
-| `MODE1` | 默认 `extra-high`，预览按已确认逻辑生成。 |
-| `MODE2` | 保存，后续扩展。 |
+| `SET1` | CKO 输出相位数：`HIGH`=8CK，`FLOAT`=4CK，`GND`=6CK。双 EK86707A 会共用配置，但预览输出路数按两颗叠加显示。 |
+| `SET2` | CKO 间隔：`HIGH`=CKO 之间存在 time interval，`LOW/FLOAT`=无 time interval。PDF 说明二输入模式下 `SET2` disabled，所以当前预览会保存该值但不把它用于二输入 CK 生成。 |
+| `SET3` | 只在 `MODE2=HIGH` 时决定 2D/3D line-on 类型：`SET3=HIGH` 是 2-line on，`SET3=LOW` 是 4-line on。`MODE2=LOW` 时强制 1-line normal，`SET3` 不改变 line-on。 |
+| `DUALSTO` / `Disa_DualSTO` | STO2 输出选择：`HIGH` 时 `STO_1` 跟随 `STI_1`，`STO_2` 保持 `VGL1`；`LOW` 时 `STO_1` 跟随 `STI_1`，`STO_2` 跟随 `STI_2`。 |
+| `OCP_EN` / `OCP_DIS` | PDF pin 是 `OCP_DIS`：`LOW/FLOAT`=OCP 启用，`HIGH`=OCP 关闭。工具保存该值，但第一版不模拟保护触发后的 Hi-Z/关断行为。 |
+| `OCP_SEL` | `FLOAT`=单输入且 OCP 阈值约 110mA；`GND`=单输入且 OCP 阈值约 180mA；`HIGH`=CKI1+CKI2 二输入模式，Terminate 脚复用为 CKI2，工具用 CPV1/CPV2 生成二进多出 CK。 |
+| `MODE1` | Pre-charge 类型：`Extra High(3~4V)`=3-line pre-charge，`High(1.5~2.5V)`=1-line pre-charge，`Middle(0.9~1.4V)`=no pre-charge，`Low(0~0.8V)`=2-line pre-charge。PDF 说明二输入模式下 `MODE1` disabled，所以二输入预览暂不应用 pre-charge。 |
+| `MODE2` | 1/2/4 line-on 主开关：`LOW`=强制 1-line normal；`HIGH`=允许 `SET3` 选择 2-line 或 4-line on。 |
 | 输入映射 | `Driver_TP`、`Init_TP`、`STV`、`CPV1`、`CPV2`、`TER`、`RST`、`POL`。EK86707A 无 STV2。 |
 
 ### 双 EK86707A

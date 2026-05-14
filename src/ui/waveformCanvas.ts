@@ -21,6 +21,8 @@ export type WaveformDrawOptions = {
   hoverEdgeId?: string;
   cursorAt?: number;
   cursorSignalName?: string;
+  dragPreviewAt?: number;
+  dragPreviewLabel?: string;
   showPulseCount?: boolean;
   selectedStartEdgeId?: string;
   selectedEndEdgeId?: string;
@@ -119,6 +121,7 @@ export function drawWaveform(
 
   drawMarkers(ctx, markers, top, signals.length * rowH, left, plotW);
   if (options.cursorAt !== undefined) drawFreeCursor(ctx, xOf(options.cursorAt), top, signals.length * rowH, left, plotW, options.cursorSignalName);
+  if (options.dragPreviewAt !== undefined) drawDragPreview(ctx, xOf(options.dragPreviewAt), top, signals.length * rowH, left, plotW, options.dragPreviewLabel);
 
   ctx.fillStyle = '#9fb2cf';
   ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
@@ -148,6 +151,26 @@ function drawFreeCursor(ctx: CanvasRenderingContext2D, x: number, top: number, p
   ctx.globalAlpha = 1;
   ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
   ctx.fillText(label ? `POINT ${label}` : 'POINT', Math.min(x + 6, left + plotW - 120), top - 20);
+  ctx.restore();
+}
+
+function drawDragPreview(ctx: CanvasRenderingContext2D, x: number, top: number, plotHeight: number, left: number, plotW: number, label?: string): void {
+  if (x < left || x > left + plotW) return;
+  ctx.save();
+  ctx.strokeStyle = '#d4a06b';
+  ctx.fillStyle = '#d4a06b';
+  ctx.lineWidth = 1.8;
+  ctx.setLineDash([8, 4]);
+  ctx.beginPath();
+  ctx.moveTo(x, top - 18);
+  ctx.lineTo(x, top + plotHeight + 6);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 0.18;
+  ctx.fillRect(Math.max(left, x - 6), top - 12, Math.min(12, left + plotW - x + 6), plotHeight + 18);
+  ctx.globalAlpha = 1;
+  ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  ctx.fillText(label ? `PATCH ${label}` : 'PATCH PREVIEW', Math.min(x + 7, left + plotW - 210), top - 24);
   ctx.restore();
 }
 

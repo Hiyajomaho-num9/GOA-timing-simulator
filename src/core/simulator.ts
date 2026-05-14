@@ -481,17 +481,12 @@ function simulateEk86707aPreview(config: Ek86707aConfig, signals: SignalTrace[],
 
   const terminateAt = inference.role === 'TER' ? cki2Rises.find((at) => at > startAt) : undefined;
   const risingEdges = cki1Rises.filter((at) => terminateAt === undefined || at < terminateAt);
-  const holdIntervals = 4;
+  const fallingEdges = fallingTimesOf(cki1, total).filter((at) => at >= startAt && (terminateAt === undefined || at < terminateAt));
   const highs: Segment[][] = Array.from({ length: count }, () => []);
-  for (let slot = 0; slot < risingEdges.length; slot += 1) {
-    const start = risingEdges[slot];
-    const nextHoldEdge = risingEdges[slot + holdIntervals];
-    const end = Math.min(nextHoldEdge ?? terminateAt ?? total, terminateAt ?? total);
-    if (end > start) highs[slot % count].push({ start, end, level: 1, source: 'ek86707a-1input' });
-  }
+  addEkSingleInputWindows(highs, risingEdges, fallingEdges, 0, 1, count, config, terminateAt, total, 'ek86707a-1input');
   const note = cki2Rises.length === 0 && config.ocpSel === '1' && inference.role === 'CPV2'
     ? '单 EK86707A preview：OCP_SEL=1 但 CPV2/CKI2 没有可用 rising edge，无法生成二进多出窗口，请检查 CPV2 输入映射。'
-    : '单 EK86707A preview：CPV1 rising edge 触发，相位轮转；extra-high 模式按 4 个 CKI rising interval 保持，TER 上升沿清零。';
+    : `单 EK86707A preview：CPV1/CKI1 rising 触发；${ekPreviewModeNote(config)}；TER rising 清零。`;
   return makeEkClockTraces(highs, count, total, note);
 }
 
@@ -510,9 +505,9 @@ function simulateDualEk86707aPreview(config: DualEk86707aConfig, signals: Signal
   const startAt = risingTimesOf(stv, total)[0] ?? 0;
   const terminateAt = risingTimesOf(ter, total).find((at) => at > startAt);
   const highs: Segment[][] = Array.from({ length: count }, () => []);
-  addDualEkOneChipWindows(highs, oddCki, 0, perChipCount, startAt, terminateAt, total, 'dual-ek86707a-odd');
-  addDualEkOneChipWindows(highs, evenCki, 1, perChipCount, startAt, terminateAt, total, 'dual-ek86707a-even');
-  return makeEkClockTraces(highs, count, total, '双 EK86707A preview：配置共用；CPV1 驱动奇数 CKO，CPV2 驱动偶数 CKO，TER rising 共用清两颗输出。');
+  addDualEkOneChipWindows(highs, oddCki, 0, perChipCount, config, startAt, terminateAt, total, 'dual-ek86707a-odd');
+  addDualEkOneChipWindows(highs, evenCki, 1, perChipCount, config, startAt, terminateAt, total, 'dual-ek86707a-even');
+  return makeEkClockTraces(highs, count, total, `双 EK86707A preview：配置共用；CPV1驱动奇数CKO、CPV2驱动偶数CKO；${ekPreviewModeNote(config)}；TER rising 共用清两颗输出。`);
 }
 
 function addDualEkOneChipWindows(
@@ -520,21 +515,89 @@ function addDualEkOneChipWindows(
   input: SignalTrace | undefined,
   phaseOffset: 0 | 1,
   perChipCount: number,
+  config: Ek86707aCommonConfig,
   startAt: number,
   terminateAt: number | undefined,
   total: number,
   source: string,
 ): void {
   const risingEdges = risingTimesOf(input, total).filter((at) => at >= startAt && (terminateAt === undefined || at < terminateAt));
-  const holdIntervals = 4;
+  const fallingEdges = fallingTimesOf(input, total).filter((at) => at >= startAt && (terminateAt === undefined || at < terminateAt));
+  addEkSingleInputWindows(highs, risingEdges, fallingEdges, phaseOffset, 2, perChipCount, config, terminateAt, total, source);
+}
+
+function addEkSingleInputWindows(
+  highs: Segment[][],
+  risingEdges: number[],
+  fallingEdges: number[],
+  phaseOffset: number,
+  channelStride: number,
+  phaseCount: number,
+  config: Ek86707aCommonConfig,
+  terminateAt: number | undefined,
+  total: number,
+  source: string,
+): void {
+  const holdIntervals = ekHoldIntervals(config);
   for (let slot = 0; slot < risingEdges.length; slot += 1) {
     const start = risingEdges[slot];
-    const nextHoldEdge = risingEdges[slot + holdIntervals];
-    const end = Math.min(nextHoldEdge ?? terminateAt ?? total, terminateAt ?? total);
+    const end = ekSingleInputWindowEnd(risingEdges, fallingEdges, slot, holdIntervals, config, terminateAt, total);
     if (end <= start) continue;
-    const channel = (slot % perChipCount) * 2 + phaseOffset;
+    const phase = slot % phaseCount;
+    const channel = phase * channelStride + phaseOffset;
     highs[channel]?.push({ start, end, level: 1, source });
   }
+}
+
+function ekSingleInputWindowEnd(
+  risingEdges: number[],
+  fallingEdges: number[],
+  slot: number,
+  holdIntervals: number,
+  config: Ek86707aCommonConfig,
+  terminateAt: number | undefined,
+  total: number,
+): number {
+  const start = risingEdges[slot];
+  const noIntervalEnd = risingEdges[slot + holdIntervals] ?? terminateAt ?? total;
+  const lastRiseIndex = Math.min(slot + holdIntervals - 1, risingEdges.length - 1);
+  const lastRiseBeforeEnd = risingEdges[lastRiseIndex] ?? start;
+  const nextFalling = firstEdgeAfter(fallingEdges, lastRiseBeforeEnd, noIntervalEnd);
+  const intervalEnd = nextFalling ?? Math.floor((lastRiseBeforeEnd + noIntervalEnd) / 2);
+  return Math.min(config.set2 ? intervalEnd : noIntervalEnd, terminateAt ?? total, total);
+}
+
+function firstEdgeAfter(edges: number[], after: number, before: number): number | undefined {
+  let lo = 0;
+  let hi = edges.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (edges[mid] <= after) lo = mid + 1;
+    else hi = mid;
+  }
+  const edge = edges[lo];
+  return edge !== undefined && edge < before ? edge : undefined;
+}
+
+function ekHoldIntervals(config: Ek86707aCommonConfig): number {
+  if (config.mode2 === '1') return config.set3 ? 2 : 4;
+  if (config.mode1 === 'extra-high') return 4;
+  if (config.mode1 === 'low') return 3;
+  if (config.mode1 === 'high') return 2;
+  return 1;
+}
+
+function ekPreviewModeNote(config: Ek86707aCommonConfig): string {
+  const interval = config.set2 ? 'SET2=HIGH 有time interval' : 'SET2=LOW/FLOAT 无time interval';
+  if (config.mode2 === '1') return `${interval}；MODE2=HIGH，${config.set3 ? 'SET3=HIGH 2-line on' : 'SET3=LOW 4-line on'}`;
+  return `${interval}；MODE2=LOW，${ekMode1Note(config.mode1)}`;
+}
+
+function ekMode1Note(mode1: Ek86707aCommonConfig['mode1']): string {
+  if (mode1 === 'extra-high') return 'MODE1=ExtraHigh 3-line pre-charge，CK保持4个CKI interval';
+  if (mode1 === 'low') return 'MODE1=Low 2-line pre-charge，CK保持3个CKI interval';
+  if (mode1 === 'high') return 'MODE1=High 1-line pre-charge，CK保持2个CKI interval';
+  return 'MODE1=Middle no pre-charge，主CK只保持当前相位';
 }
 
 function makeEkClockTraces(highs: Segment[][], count: number, total: number, note: string): SignalTrace[] {
@@ -678,6 +741,13 @@ function expandImlNormalClocks(
 function risingTimesOf(signal: SignalTrace | undefined, total: number): number[] {
   return (signal?.edges ?? [])
     .filter((edge) => edge.edge === 'rising' && edge.at >= 0 && edge.at <= total)
+    .map((edge) => edge.at)
+    .sort((a, b) => a - b);
+}
+
+function fallingTimesOf(signal: SignalTrace | undefined, total: number): number[] {
+  return (signal?.edges ?? [])
+    .filter((edge) => edge.edge === 'falling' && edge.at >= 0 && edge.at <= total)
     .map((edge) => edge.at)
     .sort((a, b) => a - b);
 }

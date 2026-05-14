@@ -151,7 +151,7 @@ export type Ek86707aCommonConfig = {
   dualSto: boolean;
   ocpEnabled: boolean;
   ocpSel: OcpSel;
-  mode1: 'extra-high' | 'high' | 'normal';
+  mode1: 'extra-high' | 'high' | 'normal' | 'low';
   mode2: '0' | '1';
   outputCount: number;
   inputs: Ek86707aInputs;
