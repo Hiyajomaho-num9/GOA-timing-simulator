@@ -125,7 +125,7 @@ export type TerCpv2Inference = {
   message: string;
 };
 
-export type LevelShifterModel = 'none' | 'single-ek86707a' | 'dual-ek86707a' | 'single-iml7272b';
+export type LevelShifterModel = 'none' | 'single-ek86707a' | 'dual-ek86707a' | 'single-iml7272b' | 'single-ek86752b';
 export type SignalRef = string;
 export type EkSet1Level = 'high' | 'float' | 'gnd';
 
@@ -187,7 +187,37 @@ export type Iml7272bConfig = {
   };
 };
 
-export type LevelShifterConfig = NoLevelShifterConfig | Ek86707aConfig | DualEk86707aConfig | Iml7272bConfig;
+export type Ek86752bInputs = {
+  stv1?: SignalRef;
+  stv2?: SignalRef;
+  reset?: SignalRef;
+  cpv1?: SignalRef;
+  cpv2?: SignalRef;
+  cpv3?: SignalRef;
+  cpv4?: SignalRef;
+  terminate?: SignalRef;
+  lcIn1?: SignalRef;
+  lcIn2?: SignalRef;
+};
+
+export type Ek86752bConfig = {
+  model: 'single-ek86752b';
+  reg00: number;
+  reg01: number;
+  reg02: number;
+  reg03: number;
+  reg04: number;
+  reg05: number;
+  reg06: number;
+  reg07: number;
+  reg08: number;
+  reg09: number;
+  reg0a: number;
+  reg0b: number;
+  inputs: Ek86752bInputs;
+};
+
+export type LevelShifterConfig = NoLevelShifterConfig | Ek86707aConfig | DualEk86707aConfig | Iml7272bConfig | Ek86752bConfig;
 
 export type TpGeneratorConfig = {
   driverTpWidth: string;
@@ -291,5 +321,22 @@ export const defaultIml7272bConfig = (): Iml7272bConfig => ({
   reg02: 0x44,
   reg03: 0x4b,
   reg04: 0x83,
+  inputs: {},
+});
+
+export const defaultEk86752bConfig = (): Ek86752bConfig => ({
+  model: 'single-ek86752b',
+  reg00: 0x3e,
+  reg01: 0x7c,
+  reg02: 0xff,
+  reg03: 0x20,
+  reg04: 0x00,
+  reg05: 0xa5,
+  reg06: 0x20,
+  reg07: 0x00,
+  reg08: 0x80,
+  reg09: 0x00,
+  reg0a: 0x06,
+  reg0b: 0x60,
   inputs: {},
 });

@@ -1,5 +1,5 @@
 import { strFromU8, strToU8, unzipSync, zipSync, type Unzipped } from 'fflate';
-import { defaultDualEk86707aConfig, defaultIml7272bConfig, defaultLevelShifterConfig, defaultNoLevelShifterConfig, defaultTpGeneratorConfig, ek86707aSet1OutputCount, type DraftProject, type DualEk86707aConfig, type Edge, type Ek86707aConfig, type Ek86707aInputs, type EkSet1Level, type GpoConfig, type Iml7272bConfig, type LevelShifterConfig, type SignalTrace, type SocProfile, type TpGeneratorConfig } from '../core/types';
+import { defaultDualEk86707aConfig, defaultEk86752bConfig, defaultIml7272bConfig, defaultLevelShifterConfig, defaultNoLevelShifterConfig, defaultTpGeneratorConfig, ek86707aSet1OutputCount, type DraftProject, type DualEk86707aConfig, type Edge, type Ek86707aConfig, type Ek86707aInputs, type Ek86752bConfig, type Ek86752bInputs, type EkSet1Level, type GpoConfig, type Iml7272bConfig, type LevelShifterConfig, type SignalTrace, type SocProfile, type TpGeneratorConfig } from '../core/types';
 import { parseXlsxBuffer, type SocProfileSelection } from '../core/xlsxParser';
 import { simulateGpoOutWindow, simulateGpoWindow, simulateProject } from '../core/simulator';
 import { formatDuration, formatPcnt } from '../core/time';
@@ -8,9 +8,10 @@ import { drawWaveform, type WaveformHitMap, type WaveformView } from './waveform
 type ViewMode = 'debug' | 'head' | 'tail' | 'frame1' | 'frame120';
 type SocProfileChoice = SocProfileSelection;
 type EkInputKey = keyof Ek86707aInputs;
+type Ek52InputKey = keyof Ek86752bInputs;
 type ImlInputKey = keyof Iml7272bConfig['inputs'];
-type LevelInputKey = EkInputKey | ImlInputKey;
-type LevelInputModel = 'ek' | 'iml';
+type LevelInputKey = EkInputKey | ImlInputKey | Ek52InputKey;
+type LevelInputModel = 'ek' | 'iml' | 'ek52';
 type DragState =
   | { mode: 'pan'; x: number; start: number; end: number }
   | { mode: 'edge'; x: number; edge: Edge; target: DraggableEdgeTarget; originAt: number; previewAt: number };
@@ -22,6 +23,7 @@ type DraggableEdgeTarget = {
 const EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2', 'rst', 'pol'];
 const DUAL_EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2', 'ter', 'rst', 'pol'];
 const IML_INPUT_KEYS: ImlInputKey[] = ['stvIn1', 'stvIn2', 'clkIn1', 'clkIn2', 'lcIn', 'terminate'];
+const EK52_INPUT_KEYS: Ek52InputKey[] = ['stv1', 'stv2', 'reset', 'cpv1', 'cpv2', 'cpv3', 'cpv4', 'terminate', 'lcIn1', 'lcIn2'];
 
 const state: {
   project: DraftProject;
@@ -48,6 +50,7 @@ const state: {
   dockCollapsed: boolean;
   manualEkInputKeys: Set<EkInputKey>;
   manualImlInputKeys: Set<ImlInputKey>;
+  manualEk52InputKeys: Set<Ek52InputKey>;
 } = {
   project: { gpos: [], levelShifter: defaultLevelShifterConfig(), tpGenerator: defaultTpGeneratorConfig(), measurements: [], patches: [], dirty: false },
   socProfileChoice: 'auto',
@@ -61,6 +64,7 @@ const state: {
   dockCollapsed: false,
   manualEkInputKeys: new Set<EkInputKey>(),
   manualImlInputKeys: new Set<ImlInputKey>(),
+  manualEk52InputKeys: new Set<Ek52InputKey>(),
 };
 
 export function mountApp(root: HTMLElement): void {
@@ -355,6 +359,7 @@ function loadWorkbook(root: HTMLElement, buffer: ArrayBuffer, fileName: string, 
   };
   state.manualEkInputKeys.clear();
   state.manualImlInputKeys.clear();
+  state.manualEk52InputKeys.clear();
   state.extraSignalIds = [];
   state.referenceSignalId = undefined;
   state.referenceEdgeId = undefined;
@@ -535,11 +540,13 @@ function levelPanel(): string {
           <option value="single-ek86707a" ${ls.model === 'single-ek86707a' ? 'selected' : ''}>单 EK86707A</option>
           <option value="dual-ek86707a" ${ls.model === 'dual-ek86707a' ? 'selected' : ''}>双 EK86707A</option>
           <option value="single-iml7272b" ${ls.model === 'single-iml7272b' ? 'selected' : ''}>单 iML7272B</option>
+          <option value="single-ek86752b" ${ls.model === 'single-ek86752b' ? 'selected' : ''}>单 EK86752B</option>
         </select>
       </label>
     </section>`;
   if (ls.model === 'none') return `${header}${mt9603Tp}<section class="panelSection"><h3>仅显示 SoC GPO</h3><p class="hint">适合 MT9603/9633 Tconless 初版适配：不生成外部 level shifter 预览，只显示 GPO raw/out、STV/CPV/LC/POL 等原生波形。</p></section>`;
   if (ls.model === 'single-iml7272b') return `${header}${mt9603Tp}${iml7272bPanel(ls)}`;
+  if (ls.model === 'single-ek86752b') return `${header}${mt9603Tp}${ek86752bPanel(ls)}`;
   const isDualEk = ls.model === 'dual-ek86707a';
   return `
     ${header}
@@ -670,8 +677,77 @@ function iml7272bPanel(ls: Iml7272bConfig): string {
     <p class="hint">输出会生成为 LS STV1 / LS STV2 / LS LC1 / LS LC2 / LS CLK1~CLK10。Terminate rising 第一版只清输出，不清 phase counter。</p>`;
 }
 
+function ek86752bPanel(ls: Ek86752bConfig): string {
+  const mode = ek52IsFourInput(ls) ? '4CPV / CPV1~4' : '2CPV / CPV1~2 + Terminate';
+  const hsr = ek52Hsr(ls);
+  return `
+    <section class="panelSection">
+      <h3>单 EK86752B 参数</h3>
+      <div class="callout ok">EK86752B 按 I2C register 独立保存在 project/report，不写 patched XLSX。OCP / Slew / UVLO / MTP 第一版只保存；DUMMY_CLK 暂只提示。</div>
+      <div class="ekParamGrid">
+        ${ek52RegInput('reg00', 'Reg00h / CK-LC OCP Time', ls.reg00)}
+        ${ek52RegInput('reg01', 'Reg01h / CK-LC OCP Level', ls.reg01)}
+        ${ek52RegInput('reg02', 'Reg02h / STV OCP', ls.reg02)}
+        ${ek52RegInput('reg03', 'Reg03h / CPV12_F2X', ls.reg03)}
+        ${ek52RegInput('reg04', 'Reg04h / CK Mode', ls.reg04)}
+        ${ek52RegInput('reg05', 'Reg05h / DISCH OCP', ls.reg05)}
+        ${ek52RegInput('reg06', 'Reg06h / CPVX/Fall/Reset', ls.reg06)}
+        ${ek52RegInput('reg07', 'Reg07h / Term/STV12', ls.reg07)}
+        ${ek52RegInput('reg08', 'Reg08h / LS/HSR/Slew', ls.reg08)}
+        ${ek52RegInput('reg09', 'Reg09h / Output DIS', ls.reg09)}
+        ${ek52RegInput('reg0a', 'Reg0Ah / LC/CLK DIS', ls.reg0a)}
+        ${ek52RegInput('reg0b', 'Reg0Bh / CH_MODE', ls.reg0b)}
+      </div>
+    </section>
+    <section class="panelSection">
+      <div class="sectionHead">
+        <h3>EK86752B CK / LC 人话参数</h3>
+        <span class="sectionMeta">${mode}；${ek52PhaseCount(ls)} phase；HSR=${hsr.toString(2).padStart(3, '0')}</span>
+      </div>
+      <div class="formGrid">
+        ${ek52Select('cpv12F2x', 'CPV12_F2X', ls.reg03 & 1, [[0, '0 / CPV1 rising high, CPV2 follows CLK_FALL_EDGE'], [1, '1 / CPV1/CPV2 rising+falling']])}
+        ${ek52Select('chMode', 'CH_MODE / phase', (ls.reg0b >> 3) & 0x07, [[0, '4 phase'], [1, '6 phase'], [2, '8 phase'], [3, '10 phase'], [4, '12 phase'], [5, '12 phase'], [6, '12 phase'], [7, '12 phase']])}
+        ${ek52Select('cpvxSel', 'CPVX_SEL / 输入模式', ls.reg06 & 1, [[0, '0 / 2-input CPV1+CPV2'], [1, '1 / 4-input CPV1~4']])}
+        ${ek52Select('hsr', 'HSR / LC+input 模式', hsr, [[0, '000 / 2CPV + LC 1in2out'], [1, '001 / 2CPV + LC 2in2out'], [2, '010 / 4CPV + LC 1in2out'], [3, '011 / 4CPV + LC 1in2out'], [4, '100 / 4CPV + LC 1in2out'], [5, '101 / 4CPV + LC 1in2out'], [6, '110 / 4CPV + LC 1in2out'], [7, '111 / 4CPV + LC 1in2out']])}
+        ${ek52Select('double', 'DOUBLE', (ls.reg04 >> 2) & 1, [[0, '0 / sequential'], [1, '1 / pair output']])}
+        ${ek52Select('en120hz', 'EN_120HZ', (ls.reg04 >> 7) & 1, [[0, '0 / normal'], [1, '1 / 120Hz pair map']])}
+        ${ek52Select('reverse', 'REVERSE', (ls.reg04 >> 3) & 1, [[0, '0 / forward'], [1, '1 / reverse']])}
+        ${ek52Select('dummyClk', 'DUMMY_CLK', (ls.reg04 >> 5) & 1, [[0, '0 / no dummy'], [1, '1 / dummy, first version warn only']])}
+        ${ek52Select('clkFallEdge', 'CLK_FALL_EDGE', (ls.reg06 >> 7) & 1, [[0, '0 / CPV2/4 falling low'], [1, '1 / CPV2/4 rising low']])}
+        ${ek52Select('stv12ClkCtrl', 'STV12_CLK_CTRL', (ls.reg07 >> 6) & 1, [[0, '0 / STV1 global start'], [1, '1 / STV1 odd + STV2 even']])}
+        ${ek52Select('termMode', 'TERM_MODE', (ls.reg07 >> 7) & 1, [[0, '0 / Term rising clear CK'], [1, '1 / Term rising no clear']])}
+        ${ek52Select('lsEnable', 'LS_EN', (ls.reg08 >> 7) & 1, [[0, '0 / output disable'], [1, '1 / output enable']])}
+        ${ek52Select('stv1Reset', 'STV1_RESET', (ls.reg0b >> 6) & 1, [[0, '0 / no reset'], [1, '1 / STV1 rising reset CK']])}
+        ${ek52Select('stv2Reset', 'STV2_RESET', (ls.reg06 >> 1) & 1, [[0, '0 / no reset'], [1, '1 / STV2 reset CK']])}
+        ${ek52Select('resetOutReset', 'RESETO_RESET', (ls.reg06 >> 2) & 1, [[0, '0 / no reset'], [1, '1 / RESETOUT reset CK']])}
+      </div>
+      <p class="hint">${htmlText(ek52HumanSummary(ls))}</p>
+    </section>
+    <section class="panelSection">
+      <div class="sectionHead">
+        <h3>EK86752B 输入映射</h3>
+        <div class="sectionActions">
+          <button id="autoDetectEk52InputsBtn" type="button">自动识别空位</button>
+          <button id="resetEk52InputLocksBtn" type="button">重置为自动</button>
+        </div>
+      </div>
+      <div class="mappingGrid">
+        ${levelInputSelect('ek52', 'stv1', 'STV1', ls.inputs.stv1)}
+        ${levelInputSelect('ek52', 'stv2', 'STV2', ls.inputs.stv2)}
+        ${levelInputSelect('ek52', 'reset', 'RESET', ls.inputs.reset)}
+        ${levelInputSelect('ek52', 'cpv1', 'CPV1', ls.inputs.cpv1)}
+        ${levelInputSelect('ek52', 'cpv2', 'CPV2', ls.inputs.cpv2)}
+        ${ek52IsFourInput(ls) ? levelInputSelect('ek52', 'cpv3', 'CPV3 / pin4', ls.inputs.cpv3) : levelInputSelect('ek52', 'lcIn2', 'LCIN2 / pin4', ls.inputs.lcIn2)}
+        ${ek52IsFourInput(ls) ? levelInputSelect('ek52', 'cpv4', 'CPV4 / pin5', ls.inputs.cpv4) : levelInputSelect('ek52', 'terminate', 'Terminate / pin5', ls.inputs.terminate)}
+        ${levelInputSelect('ek52', 'lcIn1', 'LCIN1', ls.inputs.lcIn1)}
+      </div>
+    </section>
+    <p class="hint">输出会生成为 LS STVOUT1 / STVOUT2 / RESETOUT / LCOUT1~2 / CLKOUT1~12。TP↔CK 预设只显示 LS CLKOUT1，其他 CK 可用“额外 GPO 波形”加入。</p>`;
+}
+
 function levelInputSelect(model: 'ek', key: EkInputKey, label: string, value?: string): string;
 function levelInputSelect(model: 'iml', key: ImlInputKey, label: string, value?: string): string;
+function levelInputSelect(model: 'ek52', key: Ek52InputKey, label: string, value?: string): string;
 function levelInputSelect(model: LevelInputModel, key: LevelInputKey, label: string, value?: string): string {
   const signals = levelShifterInputCandidates();
   const manual = isManualLevelInput(model, key);
@@ -714,6 +790,7 @@ function levelShifterInputCandidates(): SignalTrace[] {
 function autoFillLevelInputsFromSimulation(): string[] {
   if (isEkConfig(state.project.levelShifter)) return autoFillEkInputsFromSimulation();
   if (state.project.levelShifter.model === 'single-iml7272b') return autoFillImlInputsFromSimulation();
+  if (state.project.levelShifter.model === 'single-ek86752b') return autoFillEk52InputsFromSimulation();
   return [];
 }
 
@@ -761,7 +838,33 @@ function autoFillImlInputsFromSimulation(): string[] {
 }
 
 function suggestLevelInput(model: LevelInputModel, key: LevelInputKey): SignalTrace | undefined {
-  return model === 'ek' ? suggestEkInput(key as EkInputKey) : suggestImlInput(key as ImlInputKey);
+  if (model === 'ek') return suggestEkInput(key as EkInputKey);
+  if (model === 'ek52') return suggestEk52Input(key as Ek52InputKey);
+  return suggestImlInput(key as ImlInputKey);
+}
+
+function autoFillEk52InputsFromSimulation(): string[] {
+  if (state.project.levelShifter.model !== 'single-ek86752b') return [];
+  const changed: string[] = [];
+  const activeKeys = ek52InputKeysForConfig(state.project.levelShifter);
+  for (const key of activeKeys) {
+    if (state.manualEk52InputKeys.has(key)) continue;
+    const current = state.project.levelShifter.inputs[key];
+    if (current && signalById(current)) continue;
+    const suggested = suggestEk52Input(key);
+    if (!suggested || suggested.id === current) continue;
+    state.project.levelShifter.inputs[key] = suggested.id;
+    changed.push(`${ek52InputLabel(key)}=${suggested.name}`);
+  }
+  return changed;
+}
+
+function ek52InputKeysForConfig(config: Ek86752bConfig): Ek52InputKey[] {
+  return ek52IsFourInput(config)
+    ? ['stv1', 'stv2', 'reset', 'cpv1', 'cpv2', 'cpv3', 'cpv4', 'lcIn1']
+    : ek52Hsr(config) === 1
+      ? ['stv1', 'stv2', 'reset', 'cpv1', 'cpv2', 'terminate', 'lcIn1', 'lcIn2']
+      : ['stv1', 'stv2', 'reset', 'cpv1', 'cpv2', 'terminate', 'lcIn1'];
 }
 
 function suggestEkInput(key: EkInputKey): SignalTrace | undefined {
@@ -814,12 +917,45 @@ function suggestImlInput(key: ImlInputKey): SignalTrace | undefined {
   }
 }
 
+function suggestEk52Input(key: Ek52InputKey): SignalTrace | undefined {
+  const candidates = levelShifterInputCandidates();
+  const byId = (...ids: string[]) => ids.map((id) => signalById(id)).find(Boolean);
+  const byRule = (...patterns: RegExp[]) => candidates.find((signal) => {
+    const text = signalSearchText(signal);
+    return patterns.some((pattern) => pattern.test(text));
+  });
+  switch (key) {
+    case 'stv1':
+      return byId('stv:merge', 'stv:raw') ?? byRule(/\bstv\s*1\b/i, /\bstv\b/i);
+    case 'stv2':
+      return byRule(/\bstv\s*2\b/i, /\bstv[_\s-]*in[_\s-]*2\b/i);
+    case 'reset':
+      return byId('rst:manual') ?? byRule(/\brst\b/i, /\breset\b/i, /\bresetout\b/i);
+    case 'cpv1':
+      return byId('cpv1:merge', 'cpv1:raw') ?? byRule(/\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i, /\bcki\s*1\b/i);
+    case 'cpv2':
+      return byId('cpv2:merge', 'cpv2:raw') ?? byRule(/\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i, /\bcki\s*2\b/i);
+    case 'cpv3':
+      return byRule(/\bcpv\s*3\b/i, /\bcvp\s*3\b/i, /\bckv\s*3\b/i, /\bcki\s*3\b/i);
+    case 'cpv4':
+      return byRule(/\bcpv\s*4\b/i, /\bcvp\s*4\b/i, /\bckv\s*4\b/i, /\bcki\s*4\b/i);
+    case 'terminate':
+      return byRule(/\bterminate\b/i, /\bterm\b/i, /\bter\b/i);
+    case 'lcIn1':
+      return byRule(/\blc\s*in\s*1\b/i, /\blcin1\b/i, /\bvgpin\b/i, /\blc\b/i);
+    case 'lcIn2':
+      return byRule(/\blc\s*in\s*2\b/i, /\blcin2\b/i);
+  }
+}
+
 function signalSearchText(signal: SignalTrace): string {
   return `${signal.id} ${signal.name}`.replace(/[_:./-]+/g, ' ');
 }
 
 function isManualLevelInput(model: LevelInputModel, key: LevelInputKey): boolean {
-  return model === 'ek' ? state.manualEkInputKeys.has(key as EkInputKey) : state.manualImlInputKeys.has(key as ImlInputKey);
+  if (model === 'ek') return state.manualEkInputKeys.has(key as EkInputKey);
+  if (model === 'ek52') return state.manualEk52InputKeys.has(key as Ek52InputKey);
+  return state.manualImlInputKeys.has(key as ImlInputKey);
 }
 
 function ekInputLabel(key: EkInputKey): string {
@@ -843,6 +979,21 @@ function imlInputLabel(key: ImlInputKey): string {
     clkIn2: 'CLK_IN2',
     lcIn: 'LC_IN',
     terminate: 'Terminate',
+  }[key];
+}
+
+function ek52InputLabel(key: Ek52InputKey): string {
+  return {
+    stv1: 'STV1',
+    stv2: 'STV2',
+    reset: 'RESET',
+    cpv1: 'CPV1',
+    cpv2: 'CPV2',
+    cpv3: 'CPV3',
+    cpv4: 'CPV4',
+    terminate: 'Terminate',
+    lcIn1: 'LCIN1',
+    lcIn2: 'LCIN2',
   }[key];
 }
 
@@ -894,6 +1045,71 @@ function ekParamMeta(key: keyof Ek86707aConfig, ls: Ek86707aConfig | DualEk86707
     default:
       return '';
   }
+}
+
+type Ek52RegKey = keyof Pick<Ek86752bConfig, 'reg00' | 'reg01' | 'reg02' | 'reg03' | 'reg04' | 'reg05' | 'reg06' | 'reg07' | 'reg08' | 'reg09' | 'reg0a' | 'reg0b'>;
+
+function ek52RegInput(key: Ek52RegKey, label: string, value: number): string {
+  return `<label class="ekParamCard">
+    <span>${htmlText(label)}</span>
+    <input data-ek52-reg="${htmlAttr(key)}" value="${hexByte(value)}" />
+    <small>${htmlText(ek52RegMeta(key, value))}</small>
+  </label>`;
+}
+
+function ek52RegMeta(key: Ek52RegKey, value: number): string {
+  switch (key) {
+    case 'reg03':
+      return `CPV12_F2X=${value & 1}`;
+    case 'reg04':
+      return `EN120=${(value >> 7) & 1}, DUMMY=${(value >> 5) & 1}, REV=${(value >> 3) & 1}, DOUBLE=${(value >> 2) & 1}`;
+    case 'reg06':
+      return `FALL_EDGE=${(value >> 7) & 1}, CPVX_SEL=${value & 1}, STV2_RESET=${(value >> 1) & 1}, RESETO_RESET=${(value >> 2) & 1}`;
+    case 'reg07':
+      return `TERM_MODE=${(value >> 7) & 1}, STV12_CLK_CTRL=${(value >> 6) & 1}`;
+    case 'reg08':
+      return `LS_EN=${(value >> 7) & 1}, HSR=${((value >> 4) & 7).toString(2).padStart(3, '0')}`;
+    case 'reg0b':
+      return `STV1_RESET=${(value >> 6) & 1}, CH_MODE=${((value >> 3) & 7).toString(2).padStart(3, '0')}`;
+    default:
+      return '保存配置，不直接改变第一版波形';
+  }
+}
+
+function ek52Select(field: string, label: string, selected: number, options: Array<[number, string]>): string {
+  return `<label>${htmlText(label)}
+    <select data-ek52-field="${htmlAttr(field)}">
+      ${options.map(([value, text]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${htmlText(text)}</option>`).join('')}
+    </select>
+  </label>`;
+}
+
+function ek52HumanSummary(ls: Ek86752bConfig): string {
+  const mode = ek52IsFourInput(ls) ? '4CPV：CPV1/2 控制奇数 CK，CPV3/4 控制偶数 CK' : '2CPV：CPV1 拉高 CK，CPV2 拉低 CK，Terminate 可清输出';
+  const lc = ek52Hsr(ls) === 1 ? 'LC 为 2 输入 2 输出' : 'LC 为 1 输入 2 输出，LCOUT2 反相';
+  const lowEdge = (ls.reg03 & 1)
+    ? 'F2X=1：CPV2 rising/falling 都推进 CK falling'
+    : ek52IsFourInput(ls)
+      ? (((ls.reg06 >> 7) & 1) ? '4CPV：CPV2/CPV4 rising 触发 CK falling' : '4CPV：CPV2/CPV4 falling 触发 CK falling')
+      : (((ls.reg06 >> 7) & 1) ? 'F2X=0 + CLK_FALL_EDGE=1：CPV2 rising only 推进 CK falling' : 'F2X=0 + CLK_FALL_EDGE=0：CPV2 falling only 推进 CK falling');
+  return `${mode}；${ek52PhaseCount(ls)} phase；${lowEdge}；${lc}`;
+}
+
+function ek52IsFourInput(ls: Ek86752bConfig): boolean {
+  return (ls.reg06 & 1) !== 0 || ek52Hsr(ls) >= 2;
+}
+
+function ek52Hsr(ls: Ek86752bConfig): number {
+  return (ls.reg08 >> 4) & 7;
+}
+
+function ek52PhaseCount(ls: Ek86752bConfig): 4 | 6 | 8 | 10 | 12 {
+  const code = (ls.reg0b >> 3) & 7;
+  if (code === 0) return 4;
+  if (code === 1) return 6;
+  if (code === 2) return 8;
+  if (code === 3) return 10;
+  return 12;
 }
 
 function boolRawLabel(value: boolean): string {
@@ -1028,6 +1244,8 @@ function bindPanelEvents(root: HTMLElement): void {
     const model = (event.currentTarget as HTMLSelectElement).value as LevelShifterConfig['model'];
     state.project.levelShifter = model === 'single-iml7272b'
       ? defaultIml7272bConfig()
+      : model === 'single-ek86752b'
+        ? defaultEk86752bConfig()
       : model === 'dual-ek86707a'
         ? defaultDualEk86707aConfig()
         : model === 'none'
@@ -1038,6 +1256,7 @@ function bindPanelEvents(root: HTMLElement): void {
     state.extraSignalIds = [];
     state.manualEkInputKeys.clear();
     state.manualImlInputKeys.clear();
+    state.manualEk52InputKeys.clear();
     markDirty(root);
   });
   root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-ls]').forEach((input) => {
@@ -1066,6 +1285,12 @@ function bindPanelEvents(root: HTMLElement): void {
   });
   root.querySelectorAll<HTMLSelectElement>('[data-iml-field]').forEach((select) => {
     select.addEventListener('change', () => updateImlField(root, select));
+  });
+  root.querySelectorAll<HTMLInputElement>('[data-ek52-reg]').forEach((input) => {
+    input.addEventListener('change', () => updateEk52Reg(root, input));
+  });
+  root.querySelectorAll<HTMLSelectElement>('[data-ek52-field]').forEach((select) => {
+    select.addEventListener('change', () => updateEk52Field(root, select));
   });
   root.querySelectorAll<HTMLSelectElement>('[data-ls-input]').forEach((select) => {
     select.addEventListener('change', () => updateLevelInput(root, select));
@@ -1112,6 +1337,27 @@ function bindPanelEvents(root: HTMLElement): void {
     markDirty(root);
     recalc(root);
   });
+  root.querySelector<HTMLButtonElement>('#autoDetectEk52InputsBtn')?.addEventListener('click', () => {
+    if (state.project.levelShifter.model !== 'single-ek86752b') return;
+    if (!state.project.timing) {
+      state.message = '请先导入 XLSX，再自动识别 EK86752B 输入映射';
+      render(root);
+      return;
+    }
+    if (!state.project.simulation) state.project.simulation = simulateProject(state.project);
+    const changed = autoFillEk52InputsFromSimulation();
+    state.message = changed.length ? `已自动识别：${changed.join('，')}` : '没有新的空位可自动识别';
+    state.project.dirty = changed.length > 0;
+    if (changed.length) recalc(root);
+    else render(root);
+  });
+  root.querySelector<HTMLButtonElement>('#resetEk52InputLocksBtn')?.addEventListener('click', () => {
+    if (state.project.levelShifter.model !== 'single-ek86752b') return;
+    state.project.levelShifter.inputs = {};
+    state.manualEk52InputKeys.clear();
+    markDirty(root);
+    recalc(root);
+  });
   root.querySelector<HTMLSelectElement>('#gpoSelect')?.addEventListener('change', (event) => {
     state.selectedGpo = Number((event.currentTarget as HTMLSelectElement).value);
     render(root);
@@ -1138,6 +1384,13 @@ function bindPanelEvents(root: HTMLElement): void {
 function updateImlReg(root: HTMLElement, input: HTMLInputElement): void {
   if (state.project.levelShifter.model !== 'single-iml7272b') return;
   const key = input.dataset.imlReg as keyof Pick<Iml7272bConfig, 'reg01' | 'reg02' | 'reg03' | 'reg04'>;
+  state.project.levelShifter[key] = parseByte(input.value, state.project.levelShifter[key]);
+  markDirty(root);
+}
+
+function updateEk52Reg(root: HTMLElement, input: HTMLInputElement): void {
+  if (state.project.levelShifter.model !== 'single-ek86752b') return;
+  const key = input.dataset.ek52Reg as Ek52RegKey;
   state.project.levelShifter[key] = parseByte(input.value, state.project.levelShifter[key]);
   markDirty(root);
 }
@@ -1180,6 +1433,60 @@ function updateImlField(root: HTMLElement, select: HTMLSelectElement): void {
   markDirty(root);
 }
 
+function updateEk52Field(root: HTMLElement, select: HTMLSelectElement): void {
+  if (state.project.levelShifter.model !== 'single-ek86752b') return;
+  const ls = state.project.levelShifter;
+  const value = clampByte(Number(select.value));
+  switch (select.dataset.ek52Field) {
+    case 'cpv12F2x':
+      ls.reg03 = setBits(ls.reg03, 0, 0x01, value);
+      break;
+    case 'chMode':
+      ls.reg0b = setBits(ls.reg0b, 3, 0x07, value);
+      break;
+    case 'cpvxSel':
+      ls.reg06 = setBits(ls.reg06, 0, 0x01, value);
+      break;
+    case 'hsr':
+      ls.reg08 = setBits(ls.reg08, 4, 0x07, value);
+      break;
+    case 'double':
+      ls.reg04 = setBits(ls.reg04, 2, 0x01, value);
+      break;
+    case 'en120hz':
+      ls.reg04 = setBits(ls.reg04, 7, 0x01, value);
+      break;
+    case 'reverse':
+      ls.reg04 = setBits(ls.reg04, 3, 0x01, value);
+      break;
+    case 'dummyClk':
+      ls.reg04 = setBits(ls.reg04, 5, 0x01, value);
+      break;
+    case 'clkFallEdge':
+      ls.reg06 = setBits(ls.reg06, 7, 0x01, value);
+      break;
+    case 'stv12ClkCtrl':
+      ls.reg07 = setBits(ls.reg07, 6, 0x01, value);
+      break;
+    case 'termMode':
+      ls.reg07 = setBits(ls.reg07, 7, 0x01, value);
+      break;
+    case 'lsEnable':
+      ls.reg08 = setBits(ls.reg08, 7, 0x01, value);
+      break;
+    case 'stv1Reset':
+      ls.reg0b = setBits(ls.reg0b, 6, 0x01, value);
+      break;
+    case 'stv2Reset':
+      ls.reg06 = setBits(ls.reg06, 1, 0x01, value);
+      break;
+    case 'resetOutReset':
+      ls.reg06 = setBits(ls.reg06, 2, 0x01, value);
+      break;
+  }
+  markDirty(root);
+}
+
 function updateLevelInput(root: HTMLElement, select: HTMLSelectElement): void {
   const [model, key] = String(select.dataset.lsInput ?? '').split(':') as [LevelInputModel, LevelInputKey];
   const value = select.value || undefined;
@@ -1188,6 +1495,11 @@ function updateLevelInput(root: HTMLElement, select: HTMLSelectElement): void {
     const ekKey = key as EkInputKey;
     state.manualEkInputKeys.add(ekKey);
     state.project.levelShifter.inputs[ekKey] = value;
+  } else if (model === 'ek52') {
+    if (state.project.levelShifter.model !== 'single-ek86752b') return;
+    const ek52Key = key as Ek52InputKey;
+    state.manualEk52InputKeys.add(ek52Key);
+    state.project.levelShifter.inputs[ek52Key] = value;
   } else {
     if (state.project.levelShifter.model !== 'single-iml7272b') return;
     const imlKey = key as ImlInputKey;
@@ -1394,14 +1706,17 @@ function setDefaultView(kind: ViewMode): void {
     return edges.at(-1)?.at;
   };
   const isIml7272b = state.project.levelShifter.model === 'single-iml7272b';
+  const isEk86752b = state.project.levelShifter.model === 'single-ek86752b';
   const noLs = state.project.levelShifter.model === 'none';
   let center = isIml7272b
     ? findEdge('driver_tp') ?? findEdge('init_tp') ?? findImlInputEdge('clkIn1') ?? findImlInputEdge('clkIn2') ?? findEdge('ls:clk') ?? findEdge('ls:stv1') ?? 0
+    : isEk86752b
+      ? findEdge('cpv1') ?? findEdge('ls:clk1') ?? findEdge('ls:stv1') ?? 0
     : noLs
       ? findEdge('cpv1') ?? findEdge('cpv2') ?? findEdge('stv') ?? 0
       : findEdge('driver_tp') ?? findEdge('init_tp') ?? findEdge('cpv1') ?? 0;
-  if (kind === 'head') center = isIml7272b ? findEdge('ls:stv1') ?? findImlInputEdge('stvIn1') ?? findEdge('ls:clk') ?? center : findEdge('stv') ?? center;
-  if (kind === 'tail') center = isIml7272b ? findLastEdge('ls:clk') ?? Math.max(0, linePcnt * (t.vtotal - 6)) : findLastEdge('ck') ?? findEdge('cpv2') ?? Math.max(0, linePcnt * (t.vtotal - 6));
+  if (kind === 'head') center = isIml7272b ? findEdge('ls:stv1') ?? findImlInputEdge('stvIn1') ?? findEdge('ls:clk') ?? center : isEk86752b ? findEdge('ls:stv1') ?? findEdge('cpv1') ?? center : findEdge('stv') ?? center;
+  if (kind === 'tail') center = isIml7272b || isEk86752b ? findLastEdge('ls:clk') ?? Math.max(0, linePcnt * (t.vtotal - 6)) : findLastEdge('ck') ?? findEdge('cpv2') ?? Math.max(0, linePcnt * (t.vtotal - 6));
   if (kind === 'frame1') {
     state.view = { start: 0, end: framePcnt };
     return;
@@ -1604,6 +1919,7 @@ function visibleSignalsForMode(): SignalTrace[] {
   const byId = new Map([...ordered, ...(state.project.simulation?.gpoSignals ?? [])].map((signal) => [signal.id, signal]));
   const result: SignalTrace[] = [];
   const isIml7272b = state.project.levelShifter.model === 'single-iml7272b';
+  const isEk86752b = state.project.levelShifter.model === 'single-ek86752b';
   const push = (id: string) => {
     const signal = byId.get(id);
     if (signal && !result.some((item) => item.id === signal.id)) result.push(signal);
@@ -1648,6 +1964,18 @@ function visibleSignalsForMode(): SignalTrace[] {
     ['ls:stv1', 'ls:stv2', 'ls:lc1', 'ls:lc2'].forEach(push);
     pushCks();
   };
+  const pushEk52Inputs = () => {
+    if (state.project.levelShifter.model !== 'single-ek86752b') return;
+    const ls = state.project.levelShifter;
+    ek52InputKeysForConfig(ls).forEach((key) => {
+      const id = ls.inputs[key];
+      if (id) push(id);
+    });
+  };
+  const pushEk52Outputs = () => {
+    ['ls:stv1', 'ls:stv2', 'ls:resetout', 'ls:lc1', 'ls:lc2'].forEach(push);
+    pushCks();
+  };
 
   if (state.viewMode === 'debug') {
     if (state.project.levelShifter.model === 'none') {
@@ -1657,6 +1985,12 @@ function visibleSignalsForMode(): SignalTrace[] {
     if (isIml7272b) {
       pushTpCkDebugBase();
       pushImlClockInputsAfterBase();
+      push('ls:clk1');
+      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
+    }
+    if (isEk86752b) {
+      const ls = state.project.levelShifter;
+      if (ls.model === 'single-ek86752b') [ls.inputs.cpv1, ls.inputs.cpv2, ls.inputs.cpv3, ls.inputs.cpv4].forEach((id) => { if (id) push(id); });
       push('ls:clk1');
       return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
     }
@@ -1676,6 +2010,12 @@ function visibleSignalsForMode(): SignalTrace[] {
       ['rst:manual', 'pol:merge'].forEach(push);
       return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
     }
+    if (isEk86752b) {
+      pushEk52Inputs();
+      pushEk52Outputs();
+      ['pol:merge'].forEach(push);
+      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
+    }
     ['driver_tp:merge', 'init_tp:merge', 'stv:merge', 'cpv1:merge', 'cpv2:merge'].forEach(push);
     pushCks();
     ['rst:manual', 'pol:merge'].forEach(push);
@@ -1693,6 +2033,13 @@ function visibleSignalsForMode(): SignalTrace[] {
       ['rst:manual'].forEach(push);
       return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
     }
+    if (isEk86752b) {
+      pushCks();
+      const ls = state.project.levelShifter;
+      if (ls.model === 'single-ek86752b' && !ek52IsFourInput(ls) && ls.inputs.terminate) push(ls.inputs.terminate);
+      push('ls:resetout');
+      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
+    }
     pushCks();
     if (state.project.levelShifter.model === 'dual-ek86707a') push('ter:manual');
     else push('cpv2:merge');
@@ -1706,6 +2053,11 @@ function visibleSignalsForMode(): SignalTrace[] {
 
   if (isIml7272b) {
     pushImlOutputs();
+    ['pol:merge'].forEach(push);
+    return addExtraSignals(pinReference(result.length > 0 ? result : ordered.filter((signal) => isClockOutput(signal.id))));
+  }
+  if (isEk86752b) {
+    pushEk52Outputs();
     ['pol:merge'].forEach(push);
     return addExtraSignals(pinReference(result.length > 0 ? result : ordered.filter((signal) => isClockOutput(signal.id))));
   }
@@ -1845,6 +2197,7 @@ function orderedSignals(signals: SignalTrace[]): SignalTrace[] {
     'rst:manual',
     'ls:stv1',
     'ls:stv2',
+    'ls:resetout',
     'ls:lc1',
     'ls:lc2',
   ].forEach(push);
@@ -2047,7 +2400,7 @@ async function importLevelShifterJson(root: HTMLElement, input: HTMLInputElement
   try {
     const payload = JSON.parse(await file.text()) as { levelShifter?: unknown };
     const parsed = parseLevelShifterConfig(payload.levelShifter ?? payload);
-    if (!parsed) throw new Error('LS JSON 格式不对：需要 model=single-ek86707a 或 single-iml7272b。');
+    if (!parsed) throw new Error('LS JSON 格式不对：需要 model=single-ek86707a / dual-ek86707a / single-iml7272b / single-ek86752b。');
     state.project.levelShifter = parsed;
     state.project.tpGenerator = parseTpGeneratorConfig((payload as { tpGenerator?: unknown }).tpGenerator);
     state.referenceSignalId = undefined;
@@ -2055,6 +2408,7 @@ async function importLevelShifterJson(root: HTMLElement, input: HTMLInputElement
     state.extraSignalIds = [];
     state.manualEkInputKeys.clear();
     state.manualImlInputKeys.clear();
+    state.manualEk52InputKeys.clear();
     markDirty(root);
   } catch (error) {
     state.message = error instanceof Error ? error.message : String(error);
@@ -2108,6 +2462,37 @@ function parseLevelShifterConfig(value: unknown): LevelShifterConfig | undefined
         ter: stringOrUndefined(rawInputs.ter),
         rst: stringOrUndefined(rawInputs.rst),
         pol: stringOrUndefined(rawInputs.pol),
+      },
+    };
+  }
+  if (source.model === 'single-ek86752b') {
+    const defaults = defaultEk86752bConfig();
+    const rawInputs = source.inputs && typeof source.inputs === 'object' ? source.inputs as Record<string, unknown> : {};
+    return {
+      model: 'single-ek86752b',
+      reg00: parseConfigByte(source.reg00, defaults.reg00),
+      reg01: parseConfigByte(source.reg01, defaults.reg01),
+      reg02: parseConfigByte(source.reg02, defaults.reg02),
+      reg03: parseConfigByte(source.reg03, defaults.reg03),
+      reg04: parseConfigByte(source.reg04, defaults.reg04),
+      reg05: parseConfigByte(source.reg05, defaults.reg05),
+      reg06: parseConfigByte(source.reg06, defaults.reg06),
+      reg07: parseConfigByte(source.reg07, defaults.reg07),
+      reg08: parseConfigByte(source.reg08, defaults.reg08),
+      reg09: parseConfigByte(source.reg09, defaults.reg09),
+      reg0a: parseConfigByte(source.reg0a, defaults.reg0a),
+      reg0b: parseConfigByte(source.reg0b, defaults.reg0b),
+      inputs: {
+        stv1: stringOrUndefined(rawInputs.stv1),
+        stv2: stringOrUndefined(rawInputs.stv2),
+        reset: stringOrUndefined(rawInputs.reset),
+        cpv1: stringOrUndefined(rawInputs.cpv1),
+        cpv2: stringOrUndefined(rawInputs.cpv2),
+        cpv3: stringOrUndefined(rawInputs.cpv3),
+        cpv4: stringOrUndefined(rawInputs.cpv4),
+        terminate: stringOrUndefined(rawInputs.terminate),
+        lcIn1: stringOrUndefined(rawInputs.lcIn1),
+        lcIn2: stringOrUndefined(rawInputs.lcIn2),
       },
     };
   }
@@ -2214,6 +2599,25 @@ function levelShifterReportState(): unknown {
       reg02: hexByte(ls.reg02),
       reg03: hexByte(ls.reg03),
       reg04: hexByte(ls.reg04),
+      inputs: ls.inputs,
+    };
+  }
+  if (ls.model === 'single-ek86752b') {
+    return {
+      model: ls.model,
+      reg00: hexByte(ls.reg00),
+      reg01: hexByte(ls.reg01),
+      reg02: hexByte(ls.reg02),
+      reg03: hexByte(ls.reg03),
+      reg04: hexByte(ls.reg04),
+      reg05: hexByte(ls.reg05),
+      reg06: hexByte(ls.reg06),
+      reg07: hexByte(ls.reg07),
+      reg08: hexByte(ls.reg08),
+      reg09: hexByte(ls.reg09),
+      reg0a: hexByte(ls.reg0a),
+      reg0b: hexByte(ls.reg0b),
+      summary: ek52HumanSummary(ls),
       inputs: ls.inputs,
     };
   }

@@ -1,5 +1,5 @@
 import { defaultTpGeneratorConfig, ek86707aSet1OutputCount } from './types';
-import type { CombinType, DraftProject, Edge, DualEk86707aConfig, Ek86707aConfig, Ek86707aCommonConfig, GpoConfig, Iml7272bConfig, LogicLevel, MeasurementResult, Segment, SignalFamily, SignalTrace, SimulationResult, TerCpv2Inference, TimingBase, TpGeneratorConfig } from './types';
+import type { CombinType, DraftProject, Edge, DualEk86707aConfig, Ek86707aConfig, Ek86707aCommonConfig, Ek86752bConfig, GpoConfig, Iml7272bConfig, LogicLevel, MeasurementResult, Segment, SignalFamily, SignalTrace, SimulationResult, TerCpv2Inference, TimingBase, TpGeneratorConfig } from './types';
 import { absPcnt } from './time';
 
 const COLORS = [
@@ -53,14 +53,16 @@ export function simulateProject(project: DraftProject): SimulationResult {
   }
   const inference = isEk86707a(project.levelShifter)
     ? inferTerCpv2(ekMappedGpoIndex(project.levelShifter.inputs.cpv2, gpoSignals) ?? families.find((f) => f.id === 'cpv2')?.rawGpo, project.gpos, project.levelShifter.ocpSel)
-    : { role: 'UNKNOWN', severity: 'ok', message: project.levelShifter.model === 'single-iml7272b' ? 'iML7272B：TER/CPV2 复用规则不适用，输入由用户在 Level Shifter 参数页映射。' : '未启用 Level Shifter：仅显示 SoC GPO raw/out。' } satisfies TerCpv2Inference;
+    : { role: 'UNKNOWN', severity: 'ok', message: project.levelShifter.model === 'single-iml7272b' || project.levelShifter.model === 'single-ek86752b' ? 'Level Shifter 输入由用户在参数页映射，不使用 EK86707A TER/CPV2 自动判定。' : '未启用 Level Shifter：仅显示 SoC GPO raw/out。' } satisfies TerCpv2Inference;
   const lsSignals = project.levelShifter.model === 'single-ek86707a'
     ? simulateEk86707aPreview(project.levelShifter, signals, gpoSignals, inference, timing)
     : project.levelShifter.model === 'dual-ek86707a'
       ? simulateDualEk86707aPreview(project.levelShifter, signals, gpoSignals, timing)
       : project.levelShifter.model === 'single-iml7272b'
         ? simulateIml7272bPreview(project.levelShifter, signals, gpoSignals, timing, warnings)
-        : [];
+        : project.levelShifter.model === 'single-ek86752b'
+          ? simulateEk86752bPreview(project.levelShifter, signals, gpoSignals, timing, warnings)
+          : [];
   signals.push(...lsSignals);
 
   const allEdges = [...(project.manualEdges ?? []), ...signals.flatMap((s) => s.edges), ...gpoSignals.flatMap((s) => s.edges)];
@@ -650,6 +652,359 @@ function simulateIml7272bPreview(config: Iml7272bConfig, signals: SignalTrace[],
     note: `iML7272B preview：${modeLabel(mode, phaseCount)}；CLK_IN1/2 高脉冲按 PDF 图谱路由到 LS CLKx，Terminate rising 只清输出，不清 phase counter。`,
   }));
 }
+
+function simulateEk86752bPreview(config: Ek86752bConfig, signals: SignalTrace[], gpoSignals: SignalTrace[], timing: TimingBase, warnings: string[]): SignalTrace[] {
+  validateEk86752bConfig(config, warnings);
+  const total = timing.pcntPerLine * timing.vtotal;
+  const all = [...signals, ...gpoSignals];
+  const input = (id: string | undefined, name: string, required: boolean) => {
+    const signal = id ? all.find((item) => item.id === id) : undefined;
+    if (!signal && required) warnings.push(`EK86752B: ${name} 尚未映射，相关 LS 输出保持 LOW。`);
+    return signal;
+  };
+
+  const fourInput = ek52FourInput(config);
+  const hsr = ek52Hsr(config);
+  const lsEnabled = (config.reg08 & 0x80) !== 0;
+  const stv1 = input(config.inputs.stv1, 'STV1', false);
+  const stv2 = input(config.inputs.stv2, 'STV2', fourInput && ek52Stv12ClkCtrl(config));
+  const reset = input(config.inputs.reset, 'RESET', false);
+  const cpv1 = input(config.inputs.cpv1, 'CPV1', true);
+  const cpv2 = input(config.inputs.cpv2, 'CPV2', true);
+  const cpv3 = input(config.inputs.cpv3, 'CPV3', fourInput);
+  const cpv4 = input(config.inputs.cpv4, 'CPV4', fourInput);
+  const terminate = input(config.inputs.terminate, 'Terminate', false);
+  const lcIn1 = input(config.inputs.lcIn1, 'LCIN1', false);
+  const lcIn2 = input(config.inputs.lcIn2, 'LCIN2', hsr === 1);
+
+  const outputs: SignalTrace[] = [];
+  const disabled = !lsEnabled;
+  if (disabled) warnings.push('EK86752B: LS_EN=0，当前预览把所有 LS 输出显示为 LOW；真实硬件为 output disable。');
+  const signalOrLow = (signal: SignalTrace | undefined) => disabled ? lowSegments(total) : signal?.segments ?? lowSegments(total);
+
+  outputs.push(makeLsSignal('ls:stv1', 'LS STVOUT1', signalOrLow(stv1), total, '#7fa6bd'));
+  outputs.push(makeLsSignal('ls:stv2', 'LS STVOUT2', signalOrLow(stv2), total, '#b9a36d'));
+  outputs.push(makeLsSignal('ls:resetout', 'LS RESETOUT', signalOrLow(reset), total, '#ad826b'));
+
+  const lc1 = disabled ? lowSegments(total) : lcIn1?.segments ?? lowSegments(total);
+  const lc2 = disabled
+    ? lowSegments(total)
+    : hsr === 1
+      ? lcIn2?.segments ?? lowSegments(total)
+      : lcIn1 ? invertSegments(lcIn1.segments) : lowSegments(total);
+  outputs.push(makeLsSignal('ls:lc1', 'LS LCOUT1', lc1, total, '#8ea77d'));
+  outputs.push(makeLsSignal('ls:lc2', 'LS LCOUT2', lc2, total, '#b18463'));
+
+  const clockSegments = disabled
+    ? Array.from({ length: 12 }, () => lowSegments(total))
+    : fourInput
+      ? expandEk52FourInputClocks(config, { stv1, stv2, reset, cpv1, cpv2, cpv3, cpv4 }, total)
+      : expandEk52TwoInputClocks(config, { stv1, stv2, reset, cpv1, cpv2, terminate }, total);
+
+  const phaseCount = ek52PhaseCount(config);
+  for (let i = 0; i < 12; i += 1) {
+    outputs.push(makeLsSignal(`ls:clk${i + 1}`, `LS CLKOUT${i + 1}`, clockSegments[i] ?? lowSegments(total), total, CK_COLORS[i % CK_COLORS.length]));
+  }
+
+  const mode = fourInput ? '4CPV' : '2CPV';
+  const note = `EK86752B preview：${mode} / ${phaseCount} phase；${ek52Double(config) ? 'DOUBLE=1' : 'DOUBLE=0'}；${ek52Reverse(config) ? 'REVERSE=1' : 'REVERSE=0'}；DUMMY_CLK 仅保存提示。`;
+  return outputs.map((signal) => ({ ...signal, readonly: true, note }));
+}
+
+type Ek52TwoInputSignals = {
+  stv1?: SignalTrace;
+  stv2?: SignalTrace;
+  reset?: SignalTrace;
+  cpv1?: SignalTrace;
+  cpv2?: SignalTrace;
+  terminate?: SignalTrace;
+};
+
+type Ek52FourInputSignals = {
+  stv1?: SignalTrace;
+  stv2?: SignalTrace;
+  reset?: SignalTrace;
+  cpv1?: SignalTrace;
+  cpv2?: SignalTrace;
+  cpv3?: SignalTrace;
+  cpv4?: SignalTrace;
+};
+
+function expandEk52TwoInputClocks(config: Ek86752bConfig, signals: Ek52TwoInputSignals, total: number): Segment[][] {
+  const sequence = ek52TwoInputSequence(config);
+  const highs: Segment[][] = Array.from({ length: 12 }, () => []);
+  const active = new Map<number, number>();
+  let highIndex = 0;
+  let lowIndex = 0;
+  let armed = risingTimesOf(signals.stv1, total).length === 0;
+  let inhibited = false;
+
+  const events = [
+    ...risingTimesOf(signals.stv1, total).map((at) => ({ at, type: 'stv1' as const })),
+    ...risingTimesOf(signals.stv2, total).map((at) => ({ at, type: 'stv2' as const })),
+    ...risingTimesOf(signals.reset, total).map((at) => ({ at, type: 'reset' as const })),
+    ...ek52HighEvents(config, signals.cpv1, total).map((at) => ({ at, type: 'high' as const })),
+    ...ek52TwoInputLowEvents(config, signals.cpv2, total).map((at) => ({ at, type: 'low' as const })),
+    ...risingTimesOf(signals.terminate, total).map((at) => ({ at, type: 'term' as const })),
+  ].sort((a, b) => a.at - b.at || ek52EventRank(a.type) - ek52EventRank(b.type));
+
+  const closeAll = (at: number, source: string) => {
+    for (const [channel, start] of [...active.entries()]) {
+      if (at > start) highs[channel].push({ start, end: at, level: 1, source });
+      active.delete(channel);
+    }
+  };
+  const setGroupHigh = (group: number[], at: number) => {
+    for (const channel of group) {
+      const existing = active.get(channel);
+      if (existing !== undefined && at > existing) highs[channel].push({ start: existing, end: at, level: 1, source: 'ek86752b-overlap-close' });
+      active.set(channel, at);
+    }
+  };
+  const setGroupLow = (group: number[], at: number) => {
+    for (const channel of group) {
+      const start = active.get(channel);
+      if (start !== undefined && at > start) highs[channel].push({ start, end: at, level: 1, source: 'ek86752b-2cpv' });
+      active.delete(channel);
+    }
+  };
+
+  for (const event of events) {
+    if (event.type === 'stv1') {
+      closeAll(event.at, 'ek86752b-stv1-reset');
+      highIndex = 0;
+      lowIndex = 0;
+      armed = true;
+      inhibited = false;
+      continue;
+    }
+    if (event.type === 'stv2' && ek52Stv2Reset(config)) {
+      closeAll(event.at, 'ek86752b-stv2-reset');
+      continue;
+    }
+    if (event.type === 'reset' && ek52ResetOutReset(config)) {
+      closeAll(event.at, 'ek86752b-resetout-reset');
+      continue;
+    }
+    if (event.type === 'term') {
+      if (!ek52TermMode(config)) closeAll(event.at, 'ek86752b-terminate');
+      inhibited = true;
+      continue;
+    }
+    if (!armed || inhibited || sequence.length === 0) continue;
+    if (event.type === 'high') {
+      const group = sequence[highIndex % sequence.length];
+      setGroupHigh(group, event.at);
+      highIndex += 1;
+      continue;
+    }
+    if (event.type === 'low') {
+      const group = sequence[lowIndex % sequence.length];
+      setGroupLow(group, event.at);
+      lowIndex += 1;
+    }
+  }
+  closeAll(total, 'ek86752b-frame-end');
+  return highs.map((segments) => highPulsesToSegments(segments, total, 'ek86752b-low'));
+}
+
+function expandEk52FourInputClocks(config: Ek86752bConfig, signals: Ek52FourInputSignals, total: number): Segment[][] {
+  const { odd, even } = ek52FourInputSequences(config);
+  const highs: Segment[][] = Array.from({ length: 12 }, () => []);
+  const active = new Map<number, number>();
+  const stv12Ctrl = ek52Stv12ClkCtrl(config);
+  let oddIndex = 0;
+  let evenIndex = 0;
+  let oddArmed = stv12Ctrl ? risingTimesOf(signals.stv1, total).length === 0 : risingTimesOf(signals.stv1, total).length === 0;
+  let evenArmed = stv12Ctrl ? risingTimesOf(signals.stv2, total).length === 0 : risingTimesOf(signals.stv1, total).length === 0;
+
+  const events = [
+    ...risingTimesOf(signals.stv1, total).map((at) => ({ at, type: 'stv1' as const })),
+    ...risingTimesOf(signals.stv2, total).map((at) => ({ at, type: 'stv2' as const })),
+    ...risingTimesOf(signals.reset, total).map((at) => ({ at, type: 'reset' as const })),
+    ...risingTimesOf(signals.cpv1, total).map((at) => ({ at, type: 'oddHigh' as const })),
+    ...ek52LowEvents(config, signals.cpv2, total).map((at) => ({ at, type: 'oddLow' as const })),
+    ...risingTimesOf(signals.cpv3, total).map((at) => ({ at, type: 'evenHigh' as const })),
+    ...ek52LowEvents(config, signals.cpv4, total).map((at) => ({ at, type: 'evenLow' as const })),
+  ].sort((a, b) => a.at - b.at || ek52EventRank(a.type) - ek52EventRank(b.type));
+
+  const closeGroup = (group: number[], at: number, source: string) => {
+    for (const channel of group) {
+      const start = active.get(channel);
+      if (start !== undefined && at > start) highs[channel].push({ start, end: at, level: 1, source });
+      active.delete(channel);
+    }
+  };
+  const closeAll = (at: number, source: string) => {
+    for (const [channel, start] of [...active.entries()]) {
+      if (at > start) highs[channel].push({ start, end: at, level: 1, source });
+      active.delete(channel);
+    }
+  };
+  const openGroup = (group: number[], at: number) => {
+    for (const channel of group) {
+      const existing = active.get(channel);
+      if (existing !== undefined && at > existing) highs[channel].push({ start: existing, end: at, level: 1, source: 'ek86752b-overlap-close' });
+      active.set(channel, at);
+    }
+  };
+
+  for (const event of events) {
+    if (event.type === 'stv1') {
+      if (ek52Stv1Reset(config)) closeAll(event.at, 'ek86752b-stv1-reset');
+      oddIndex = 0;
+      oddArmed = true;
+      if (!stv12Ctrl) {
+        evenIndex = 0;
+        evenArmed = true;
+      }
+      continue;
+    }
+    if (event.type === 'stv2') {
+      if (ek52Stv2Reset(config)) closeAll(event.at, 'ek86752b-stv2-reset');
+      if (stv12Ctrl) {
+        evenIndex = 0;
+        evenArmed = true;
+      }
+      continue;
+    }
+    if (event.type === 'reset' && ek52ResetOutReset(config)) {
+      closeAll(event.at, 'ek86752b-resetout-reset');
+      continue;
+    }
+    if (event.type === 'oddHigh' && oddArmed && odd.length > 0) {
+      openGroup(odd[oddIndex % odd.length], event.at);
+      continue;
+    }
+    if (event.type === 'oddLow' && oddArmed && odd.length > 0) {
+      closeGroup(odd[oddIndex % odd.length], event.at, 'ek86752b-4cpv-odd');
+      oddIndex += 1;
+      continue;
+    }
+    if (event.type === 'evenHigh' && evenArmed && even.length > 0) {
+      openGroup(even[evenIndex % even.length], event.at);
+      continue;
+    }
+    if (event.type === 'evenLow' && evenArmed && even.length > 0) {
+      closeGroup(even[evenIndex % even.length], event.at, 'ek86752b-4cpv-even');
+      evenIndex += 1;
+    }
+  }
+  closeAll(total, 'ek86752b-frame-end');
+  return highs.map((segments) => highPulsesToSegments(segments, total, 'ek86752b-low'));
+}
+
+function ek52TwoInputSequence(config: Ek86752bConfig): number[][] {
+  const phaseCount = ek52PhaseCount(config);
+  let sequence: number[][];
+  if (ek52Double(config)) {
+    sequence = ek52En120Hz(config)
+      ? ek52En120Pairs(phaseCount)
+      : pairAdjacent(Array.from({ length: phaseCount }, (_unused, index) => index));
+  } else {
+    sequence = Array.from({ length: phaseCount }, (_unused, index) => [index]);
+  }
+  return ek52Reverse(config) ? [...sequence].reverse() : sequence;
+}
+
+function ek52FourInputSequences(config: Ek86752bConfig): { odd: number[][]; even: number[][] } {
+  const phaseCount = ek52PhaseCount(config);
+  const oddChannels = Array.from({ length: phaseCount }, (_unused, index) => index).filter((index) => index % 2 === 0);
+  const evenChannels = Array.from({ length: phaseCount }, (_unused, index) => index).filter((index) => index % 2 === 1);
+  let odd = ek52Double(config) ? pairAdjacent(oddChannels) : oddChannels.map((index) => [index]);
+  let even = ek52Double(config) ? pairAdjacent(evenChannels) : evenChannels.map((index) => [index]);
+  if (ek52Reverse(config)) {
+    odd = [...odd].reverse();
+    even = [...even].reverse();
+  }
+  return { odd, even };
+}
+
+function pairAdjacent(channels: number[]): number[][] {
+  const pairs: number[][] = [];
+  for (let i = 0; i < channels.length; i += 2) {
+    pairs.push(channels.slice(i, i + 2));
+  }
+  return pairs;
+}
+
+function ek52En120Pairs(phaseCount: number): number[][] {
+  const out: number[][] = [];
+  for (let base = 0; base < phaseCount; base += 4) {
+    const first = [base, base + 2].filter((index) => index < phaseCount);
+    const second = [base + 1, base + 3].filter((index) => index < phaseCount);
+    if (first.length > 0) out.push(first);
+    if (second.length > 0) out.push(second);
+  }
+  return out;
+}
+
+function ek52HighEvents(config: Ek86752bConfig, signal: SignalTrace | undefined, total: number): number[] {
+  return ek52Cpv12F2x(config) ? bothTimesOf(signal, total) : risingTimesOf(signal, total);
+}
+
+function ek52TwoInputLowEvents(config: Ek86752bConfig, signal: SignalTrace | undefined, total: number): number[] {
+  // 0x03[0]=0: CPV2 low follows CLK_FALL_EDGE.
+  // 0x03[0]=1: CPV2 rising/falling sequentially pull CLKOUT1~12 low.
+  if (!ek52Cpv12F2x(config)) return ek52ClkFallEdge(config) ? risingTimesOf(signal, total) : fallingTimesOf(signal, total);
+  return bothTimesOf(signal, total);
+}
+
+function ek52LowEvents(config: Ek86752bConfig, signal: SignalTrace | undefined, total: number): number[] {
+  return ek52ClkFallEdge(config) ? risingTimesOf(signal, total) : fallingTimesOf(signal, total);
+}
+
+function bothTimesOf(signal: SignalTrace | undefined, total: number): number[] {
+  return (signal?.edges ?? [])
+    .filter((edge) => (edge.edge === 'rising' || edge.edge === 'falling') && edge.at >= 0 && edge.at <= total)
+    .map((edge) => edge.at)
+    .sort((a, b) => a - b);
+}
+
+function validateEk86752bConfig(config: Ek86752bConfig, warnings: string[]): void {
+  const hsr = ek52Hsr(config);
+  const cpvx = (config.reg06 & 0x01) !== 0;
+  if (!cpvx && hsr >= 2) warnings.push('EK86752B: CPVX_SEL=0 但 HSR=010..111，HSR 指向 4-input，当前按 4CPV 预览并提示配置冲突。');
+  if (cpvx && hsr <= 1) warnings.push('EK86752B: CPVX_SEL=1 但 HSR=000/001，CPVX 指向 4-input，当前按 4CPV 预览并提示配置冲突。');
+  if (((config.reg04 >> 7) & 1) && !ek52Double(config)) warnings.push('EK86752B: EN_120HZ=1 需要 DOUBLE=1 才符合 PDF 图谱，当前预览忽略 120Hz pair。');
+  if (ek52En120Hz(config) && (ek52PhaseCount(config) === 6 || ek52PhaseCount(config) === 10)) warnings.push('EK86752B: EN_120HZ=1 时 PDF 标注 6/10 phase NOT SUPPORT。');
+  if (ek52DummyClk(config)) warnings.push('EK86752B: DUMMY_CLK=1 第一版只保存并提示，暂不移动 CK 相位。');
+  const clkDis = (config.reg0a >> 6) & 0x03;
+  const lcDis = (config.reg0a >> 4) & 0x03;
+  const stvDis = (config.reg09 >> 4) & 0x0f;
+  if (clkDis !== 0) warnings.push(`EK86752B: CLK_DIS=${clkDis.toString(2).padStart(2, '0')}，第一版仍画逻辑波形，请注意真实输出可能 VGL2/HiZ。`);
+  if (lcDis !== 0) warnings.push(`EK86752B: LC_DIS=${lcDis.toString(2).padStart(2, '0')}，第一版仍画逻辑波形，请注意真实输出可能 VGL2/HiZ。`);
+  if (stvDis !== 0) warnings.push('EK86752B: STV/RESETO disable bits 非默认，第一版仍画输入跟随波形，请注意真实输出可能 VGL2/HiZ。');
+}
+
+function ek52EventRank(type: string): number {
+  if (type === 'stv1' || type === 'stv2' || type === 'reset' || type === 'term') return 0;
+  if (type.endsWith('High') || type === 'high') return 1;
+  return 2;
+}
+
+function ek52PhaseCount(config: Ek86752bConfig): 4 | 6 | 8 | 10 | 12 {
+  const code = (config.reg0b >> 3) & 0x07;
+  if (code === 0) return 4;
+  if (code === 1) return 6;
+  if (code === 2) return 8;
+  if (code === 3) return 10;
+  return 12;
+}
+
+function ek52Hsr(config: Ek86752bConfig): number { return (config.reg08 >> 4) & 0x07; }
+function ek52FourInput(config: Ek86752bConfig): boolean { return (config.reg06 & 0x01) !== 0 || ek52Hsr(config) >= 2; }
+function ek52Cpv12F2x(config: Ek86752bConfig): boolean { return (config.reg03 & 0x01) !== 0; }
+function ek52Double(config: Ek86752bConfig): boolean { return (config.reg04 & 0x04) !== 0; }
+function ek52Reverse(config: Ek86752bConfig): boolean { return (config.reg04 & 0x08) !== 0; }
+function ek52DummyClk(config: Ek86752bConfig): boolean { return (config.reg04 & 0x20) !== 0; }
+function ek52En120Hz(config: Ek86752bConfig): boolean { return (config.reg04 & 0x80) !== 0 && ek52Double(config); }
+function ek52ClkFallEdge(config: Ek86752bConfig): boolean { return (config.reg06 & 0x80) !== 0; }
+function ek52Stv2Reset(config: Ek86752bConfig): boolean { return (config.reg06 & 0x02) !== 0; }
+function ek52ResetOutReset(config: Ek86752bConfig): boolean { return (config.reg06 & 0x04) !== 0; }
+function ek52Stv12ClkCtrl(config: Ek86752bConfig): boolean { return (config.reg07 & 0x40) !== 0; }
+function ek52TermMode(config: Ek86752bConfig): boolean { return (config.reg07 & 0x80) !== 0; }
+function ek52Stv1Reset(config: Ek86752bConfig): boolean { return (config.reg0b & 0x40) !== 0; }
 
 function imlPhaseCount(config: Iml7272bConfig): 4 | 6 | 8 | 10 {
   const code = config.reg04 & 0x03;
