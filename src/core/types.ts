@@ -125,7 +125,7 @@ export type TerCpv2Inference = {
   message: string;
 };
 
-export type LevelShifterModel = 'none' | 'single-ek86707a' | 'dual-ek86707a' | 'single-iml7272b' | 'single-ek86752b';
+type LevelShifterModel = 'none' | 'single-ek86707a' | 'dual-ek86707a' | 'single-iml7272b' | 'single-ek86752b';
 export type SignalRef = string;
 export type EkSet1Level = 'high' | 'float' | 'gnd';
 

@@ -2,7 +2,7 @@ import { strFromU8, strToU8, unzipSync, zipSync, type Unzipped } from 'fflate';
 import { defaultDualEk86707aConfig, defaultEk86752bConfig, defaultIml7272bConfig, defaultLevelShifterConfig, defaultNoLevelShifterConfig, defaultTpGeneratorConfig, ek86707aSet1OutputCount, type DraftProject, type DualEk86707aConfig, type Edge, type Ek86707aConfig, type Ek86707aInputs, type Ek86752bConfig, type Ek86752bInputs, type EkSet1Level, type GpoConfig, type Iml7272bConfig, type LevelShifterConfig, type SignalTrace, type SocProfile, type TpGeneratorConfig } from '../core/types';
 import { parseXlsxBuffer, type SocProfileSelection } from '../core/xlsxParser';
 import { simulateGpoOutWindow, simulateGpoWindow, simulateProject } from '../core/simulator';
-import { formatDuration, formatPcnt } from '../core/time';
+import { formatCount4, formatDuration, formatPcnt } from '../core/time';
 import { drawWaveform, type WaveformHitMap, type WaveformView } from './waveformCanvas';
 
 type ViewMode = 'debug' | 'head' | 'tail' | 'frame1' | 'frame120';
@@ -24,6 +24,37 @@ const EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2'
 const DUAL_EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2', 'ter', 'rst', 'pol'];
 const IML_INPUT_KEYS: ImlInputKey[] = ['stvIn1', 'stvIn2', 'clkIn1', 'clkIn2', 'lcIn', 'terminate'];
 const EK52_INPUT_KEYS: Ek52InputKey[] = ['stv1', 'stv2', 'reset', 'cpv1', 'cpv2', 'cpv3', 'cpv4', 'terminate', 'lcIn1', 'lcIn2'];
+type InputRule = { ids?: string[]; patterns?: RegExp[] };
+const EK_INPUT_RULES: Record<EkInputKey, InputRule> = {
+  driverTp: { ids: ['driver_tp:merge', 'driver_tp:raw'], patterns: [/\bdriver\s*tp\b/i, /\btp\s*for\s*driver\b/i] },
+  initTp: { ids: ['init_tp:merge', 'init_tp:raw'], patterns: [/\binit\s*tp\b/i, /\bint\s*tp\b/i, /\btp\s*for\s*tcon\b/i] },
+  stv: { ids: ['stv:merge', 'stv:raw'], patterns: [/\bstv\b/i] },
+  cpv1: { ids: ['cpv1:merge', 'cpv1:raw'], patterns: [/\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i] },
+  cpv2: { ids: ['cpv2:merge', 'cpv2:raw'], patterns: [/\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i, /\bterminate\b/i, /\bter\b/i] },
+  ter: { ids: ['ter:manual'], patterns: [/\bterminate\b/i, /\bterm\b/i, /\bter\b/i] },
+  rst: { ids: ['rst:manual'], patterns: [/\brst\b/i, /\breset\b/i] },
+  pol: { ids: ['pol:merge', 'pol:raw'], patterns: [/\bpol\b/i] },
+};
+const IML_INPUT_RULES: Record<ImlInputKey, InputRule> = {
+  stvIn1: { ids: ['stv:merge', 'stv:raw'], patterns: [/\bstv\s*(out|merge)?\b/i, /\bstv1\b/i] },
+  stvIn2: { patterns: [/\bstv\s*in\s*2\b/i, /\bstv[_\s-]*2\b/i, /\bstv2\b/i] },
+  clkIn1: { ids: ['cpv1:merge', 'cpv1:raw'], patterns: [/\bclk\s*in\s*1\b/i, /\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i] },
+  clkIn2: { ids: ['cpv2:merge', 'cpv2:raw'], patterns: [/\bclk\s*in\s*2\b/i, /\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i] },
+  lcIn: { patterns: [/\blc\s*in\b/i, /\bvgpin\b/i, /\blc\b/i] },
+  terminate: { patterns: [/\bterminate\b/i, /\bterm\b/i, /\bter\b/i] },
+};
+const EK52_INPUT_RULES: Record<Ek52InputKey, InputRule> = {
+  stv1: { ids: ['stv:merge', 'stv:raw'], patterns: [/\bstv\s*1\b/i, /\bstv\b/i] },
+  stv2: { patterns: [/\bstv\s*2\b/i, /\bstv[_\s-]*in[_\s-]*2\b/i] },
+  reset: { ids: ['rst:manual'], patterns: [/\brst\b/i, /\breset\b/i, /\bresetout\b/i] },
+  cpv1: { ids: ['cpv1:merge', 'cpv1:raw'], patterns: [/\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i, /\bcki\s*1\b/i] },
+  cpv2: { ids: ['cpv2:merge', 'cpv2:raw'], patterns: [/\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i, /\bcki\s*2\b/i] },
+  cpv3: { patterns: [/\bcpv\s*3\b/i, /\bcvp\s*3\b/i, /\bckv\s*3\b/i, /\bcki\s*3\b/i] },
+  cpv4: { patterns: [/\bcpv\s*4\b/i, /\bcvp\s*4\b/i, /\bckv\s*4\b/i, /\bcki\s*4\b/i] },
+  terminate: { patterns: [/\bterminate\b/i, /\bterm\b/i, /\bter\b/i] },
+  lcIn1: { patterns: [/\blc\s*in\s*1\b/i, /\blcin1\b/i, /\bvgpin\b/i, /\blc\b/i] },
+  lcIn2: { patterns: [/\blc\s*in\s*2\b/i, /\blcin2\b/i] },
+};
 
 const state: {
   project: DraftProject;
@@ -868,84 +899,25 @@ function ek52InputKeysForConfig(config: Ek86752bConfig): Ek52InputKey[] {
 }
 
 function suggestEkInput(key: EkInputKey): SignalTrace | undefined {
-  const candidates = levelShifterInputCandidates();
-  const byId = (...ids: string[]) => ids.map((id) => signalById(id)).find(Boolean);
-  const byRule = (...patterns: RegExp[]) => candidates.find((signal) => {
-    const text = signalSearchText(signal);
-    return patterns.some((pattern) => pattern.test(text));
-  });
-  switch (key) {
-    case 'driverTp':
-      return byId('driver_tp:merge', 'driver_tp:raw') ?? byRule(/\bdriver\s*tp\b/i, /\btp\s*for\s*driver\b/i);
-    case 'initTp':
-      return byId('init_tp:merge', 'init_tp:raw') ?? byRule(/\binit\s*tp\b/i, /\bint\s*tp\b/i, /\btp\s*for\s*tcon\b/i);
-    case 'stv':
-      return byId('stv:merge', 'stv:raw') ?? byRule(/\bstv\b/i);
-    case 'cpv1':
-      return byId('cpv1:merge', 'cpv1:raw') ?? byRule(/\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i);
-    case 'cpv2':
-      return byId('cpv2:merge', 'cpv2:raw') ?? byRule(/\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i, /\bterminate\b/i, /\bter\b/i);
-    case 'ter':
-      return byId('ter:manual') ?? byRule(/\bterminate\b/i, /\bterm\b/i, /\bter\b/i);
-    case 'rst':
-      return byId('rst:manual') ?? byRule(/\brst\b/i, /\breset\b/i);
-    case 'pol':
-      return byId('pol:merge', 'pol:raw') ?? byRule(/\bpol\b/i);
-  }
+  return suggestByRule(EK_INPUT_RULES[key]);
 }
 
 function suggestImlInput(key: ImlInputKey): SignalTrace | undefined {
-  const candidates = levelShifterInputCandidates();
-  const byId = (...ids: string[]) => ids.map((id) => signalById(id)).find(Boolean);
-  const byRule = (...patterns: RegExp[]) => candidates.find((signal) => {
-    const text = signalSearchText(signal);
-    return patterns.some((pattern) => pattern.test(text));
-  });
-  switch (key) {
-    case 'stvIn1':
-      return byId('stv:merge', 'stv:raw') ?? byRule(/\bstv\s*(out|merge)?\b/i, /\bstv1\b/i);
-    case 'stvIn2':
-      return byRule(/\bstv\s*in\s*2\b/i, /\bstv[_\s-]*2\b/i, /\bstv2\b/i);
-    case 'clkIn1':
-      return byId('cpv1:merge', 'cpv1:raw') ?? byRule(/\bclk\s*in\s*1\b/i, /\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i);
-    case 'clkIn2':
-      return byId('cpv2:merge', 'cpv2:raw') ?? byRule(/\bclk\s*in\s*2\b/i, /\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i);
-    case 'lcIn':
-      return byRule(/\blc\s*in\b/i, /\bvgpin\b/i, /\blc\b/i);
-    case 'terminate':
-      return byRule(/\bterminate\b/i, /\bterm\b/i, /\bter\b/i);
-  }
+  return suggestByRule(IML_INPUT_RULES[key]);
 }
 
 function suggestEk52Input(key: Ek52InputKey): SignalTrace | undefined {
+  return suggestByRule(EK52_INPUT_RULES[key]);
+}
+
+function suggestByRule(rule: InputRule): SignalTrace | undefined {
+  const byId = rule.ids?.map((id) => signalById(id)).find(Boolean);
+  if (byId) return byId;
   const candidates = levelShifterInputCandidates();
-  const byId = (...ids: string[]) => ids.map((id) => signalById(id)).find(Boolean);
-  const byRule = (...patterns: RegExp[]) => candidates.find((signal) => {
+  return candidates.find((signal) => {
     const text = signalSearchText(signal);
-    return patterns.some((pattern) => pattern.test(text));
+    return rule.patterns?.some((pattern) => pattern.test(text));
   });
-  switch (key) {
-    case 'stv1':
-      return byId('stv:merge', 'stv:raw') ?? byRule(/\bstv\s*1\b/i, /\bstv\b/i);
-    case 'stv2':
-      return byRule(/\bstv\s*2\b/i, /\bstv[_\s-]*in[_\s-]*2\b/i);
-    case 'reset':
-      return byId('rst:manual') ?? byRule(/\brst\b/i, /\breset\b/i, /\bresetout\b/i);
-    case 'cpv1':
-      return byId('cpv1:merge', 'cpv1:raw') ?? byRule(/\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i, /\bcki\s*1\b/i);
-    case 'cpv2':
-      return byId('cpv2:merge', 'cpv2:raw') ?? byRule(/\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i, /\bcki\s*2\b/i);
-    case 'cpv3':
-      return byRule(/\bcpv\s*3\b/i, /\bcvp\s*3\b/i, /\bckv\s*3\b/i, /\bcki\s*3\b/i);
-    case 'cpv4':
-      return byRule(/\bcpv\s*4\b/i, /\bcvp\s*4\b/i, /\bckv\s*4\b/i, /\bcki\s*4\b/i);
-    case 'terminate':
-      return byRule(/\bterminate\b/i, /\bterm\b/i, /\bter\b/i);
-    case 'lcIn1':
-      return byRule(/\blc\s*in\s*1\b/i, /\blcin1\b/i, /\bvgpin\b/i, /\blc\b/i);
-    case 'lcIn2':
-      return byRule(/\blc\s*in\s*2\b/i, /\blcin2\b/i);
-  }
 }
 
 function signalSearchText(signal: SignalTrace): string {
@@ -1170,10 +1142,10 @@ function combinPanel(): string {
       <label>GPO_Combin_SEL <input data-gpo-field="combinSel" type="number" min="0" max="23" value="${selected.combinSel}" /></label>
       <label>Repeat_mode_SEL <input data-gpo-field="repeatMode" type="number" min="0" max="1" value="${selected.repeatMode}" /></label>
       <label class="check"><input data-gpo-field="maskEnabled" type="checkbox" ${selected.maskEnabled ? 'checked' : ''}/> Mask_region_EN</label>
-      <label>Region_VST <input data-gpo-field="regionVst" type="number" value="${selected.regionVst}" /></label>
-      <label>Region_VEND <input data-gpo-field="regionVend" type="number" value="${selected.regionVend}" /></label>
-      <label>Region_pst <input data-gpo-field="regionPst" type="number" value="${selected.regionPst}" /></label>
-      <label>Region_pend <input data-gpo-field="regionPend" type="number" value="${selected.regionPend}" /></label>
+      <label>Region_VST ${countInput('data-gpo-field="regionVst"', selected.regionVst)}</label>
+      <label>Region_VEND ${countInput('data-gpo-field="regionVend"', selected.regionVend)}</label>
+      <label>Region_pst ${countInput('data-gpo-field="regionPst"', selected.regionPst)}</label>
+      <label>Region_pend ${countInput('data-gpo-field="regionPend"', selected.regionPend)}</label>
       <label>Region_other_Value <input data-gpo-field="regionOtherValue" type="number" min="0" max="1" value="${selected.regionOtherValue}" /></label>
     </div>`;
 }
@@ -1200,7 +1172,7 @@ function measurementRow(m: NonNullable<DraftProject['simulation']>['measurements
     <td>${m.id}</td>
     <td>${edgeLabel(m.startEdge)}</td>
     <td>${edgeLabel(m.endEdge)}</td>
-    <td>${m.deltaPcnt ?? '-'} pcnt<br>${formatDuration(m.seconds)}</td>
+    <td>${formatMeasurementPcnt(m.deltaPcnt)}<br>${formatDuration(m.seconds)}</td>
     <td><input data-measure-index="${index}" data-measure-field="targetInput" placeholder="3us / 445pcnt" value="${htmlAttr(source?.targetInput ?? formatTargetInput(m.targetSeconds))}" /></td>
     <td>${formatTargetDelta(m)}</td>
     <td><button data-delete-measure="${index}">删除</button></td>
@@ -1217,6 +1189,20 @@ function edgeLabel(edge?: Edge): string {
   return `${edge.signalName} ${action} @ ${formatPcnt(edge.at, state.project.timing.pcntPerLine)}`;
 }
 
+function countInput(attrs: string, value: number, extra = ''): string {
+  return `<input ${attrs} type="text" inputmode="numeric" pattern="-?\\d*" value="${formatCount4(value)}" ${extra}/>`;
+}
+
+function formatMeasurementPcnt(deltaPcnt: number | undefined): string {
+  if (deltaPcnt === undefined) return '-';
+  if (!state.project.timing) return `${deltaPcnt} pcnt`;
+  const sign = deltaPcnt < 0 ? '-' : '';
+  const abs = Math.abs(deltaPcnt);
+  const lcnt = Math.trunc(abs / state.project.timing.pcntPerLine);
+  const pcnt = abs % state.project.timing.pcntPerLine;
+  return `${deltaPcnt} pcnt (${sign}L${formatCount4(lcnt)}.P${formatCount4(pcnt)})`;
+}
+
 function gpoSelector(gpos: GpoConfig[]): string {
   return `<label>GPO 选择 <select id="gpoSelect">${gpos.map((g) => `<option value="${g.index}" ${state.selectedGpo === g.index ? 'selected' : ''}>${g.group}</option>`).join('')}</select></label>`;
 }
@@ -1228,8 +1214,8 @@ function entryTable(gpo: GpoConfig): string {
       <td><input data-entry="${e.index}" data-entry-field="fcnt" value="0x${e.fcnt.toString(16).toUpperCase()}" /></td>
       <td>${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="enabled" type="number" min="0" max="1" value="${e.enabled ? 1 : 0}" />` : e.enabled ? '1' : '0'}</td>
       <td>${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="level" type="number" min="0" max="1" value="${e.level}" />` : e.level ? 'HIGH' : 'LOW'}</td>
-      <td><input data-entry="${e.index}" data-entry-field="lcnt" type="number" value="${e.lcnt}" ${gpo.repeatMode === 0 && gpo.soc !== 'mt9603' ? 'disabled title="by-line 禁止修改 LCNT"' : ''}/></td>
-      <td><input data-entry="${e.index}" data-entry-field="pcnt" type="number" value="${e.pcnt}" /></td>
+      <td>${countInput(`data-entry="${e.index}" data-entry-field="lcnt"`, e.lcnt, gpo.repeatMode === 0 && gpo.soc !== 'mt9603' ? 'disabled title="by-line 禁止修改 LCNT"' : '')}</td>
+      <td>${countInput(`data-entry="${e.index}" data-entry-field="pcnt"`, e.pcnt)}</td>
       <td>${e.cells.enable?.address ?? '-'} / ${e.cells.level?.address ?? '-'} / ${e.cells.fcnt?.address ?? '-'} / ${e.cells.lcnt?.address ?? '-'} / ${e.cells.pcnt?.address ?? '-'}</td>
     </tr>`).join('')}
   </tbody></table>`;
@@ -1254,9 +1240,7 @@ function bindPanelEvents(root: HTMLElement): void {
     state.referenceSignalId = undefined;
     state.referenceEdgeId = undefined;
     state.extraSignalIds = [];
-    state.manualEkInputKeys.clear();
-    state.manualImlInputKeys.clear();
-    state.manualEk52InputKeys.clear();
+    clearManualLevelInputLocks();
     markDirty(root);
   });
   root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-ls]').forEach((input) => {
@@ -1297,17 +1281,7 @@ function bindPanelEvents(root: HTMLElement): void {
   });
   root.querySelector<HTMLButtonElement>('#autoDetectEkInputsBtn')?.addEventListener('click', () => {
     if (!isEkConfig(state.project.levelShifter)) return;
-    if (!state.project.timing) {
-      state.message = '请先导入 XLSX，再自动识别 EK 输入映射';
-      render(root);
-      return;
-    }
-    if (!state.project.simulation) state.project.simulation = simulateProject(state.project);
-    const changed = autoFillEkInputsFromSimulation();
-    state.message = changed.length ? `已自动识别：${changed.join('，')}` : '没有新的空位可自动识别';
-    state.project.dirty = changed.length > 0;
-    if (changed.length) recalc(root);
-    else render(root);
+    runLevelInputAutoDetect(root, '请先导入 XLSX，再自动识别 EK 输入映射', autoFillEkInputsFromSimulation);
   });
   root.querySelector<HTMLButtonElement>('#resetEkInputLocksBtn')?.addEventListener('click', () => {
     if (!isEkConfig(state.project.levelShifter)) return;
@@ -1318,17 +1292,7 @@ function bindPanelEvents(root: HTMLElement): void {
   });
   root.querySelector<HTMLButtonElement>('#autoDetectImlInputsBtn')?.addEventListener('click', () => {
     if (state.project.levelShifter.model !== 'single-iml7272b') return;
-    if (!state.project.timing) {
-      state.message = '请先导入 XLSX，再自动识别 iML 输入映射';
-      render(root);
-      return;
-    }
-    if (!state.project.simulation) state.project.simulation = simulateProject(state.project);
-    const changed = autoFillImlInputsFromSimulation();
-    state.message = changed.length ? `已自动识别：${changed.join('，')}` : '没有新的空位可自动识别';
-    state.project.dirty = changed.length > 0;
-    if (changed.length) recalc(root);
-    else render(root);
+    runLevelInputAutoDetect(root, '请先导入 XLSX，再自动识别 iML 输入映射', autoFillImlInputsFromSimulation);
   });
   root.querySelector<HTMLButtonElement>('#resetImlInputLocksBtn')?.addEventListener('click', () => {
     if (state.project.levelShifter.model !== 'single-iml7272b') return;
@@ -1339,17 +1303,7 @@ function bindPanelEvents(root: HTMLElement): void {
   });
   root.querySelector<HTMLButtonElement>('#autoDetectEk52InputsBtn')?.addEventListener('click', () => {
     if (state.project.levelShifter.model !== 'single-ek86752b') return;
-    if (!state.project.timing) {
-      state.message = '请先导入 XLSX，再自动识别 EK86752B 输入映射';
-      render(root);
-      return;
-    }
-    if (!state.project.simulation) state.project.simulation = simulateProject(state.project);
-    const changed = autoFillEk52InputsFromSimulation();
-    state.message = changed.length ? `已自动识别：${changed.join('，')}` : '没有新的空位可自动识别';
-    state.project.dirty = changed.length > 0;
-    if (changed.length) recalc(root);
-    else render(root);
+    runLevelInputAutoDetect(root, '请先导入 XLSX，再自动识别 EK86752B 输入映射', autoFillEk52InputsFromSimulation);
   });
   root.querySelector<HTMLButtonElement>('#resetEk52InputLocksBtn')?.addEventListener('click', () => {
     if (state.project.levelShifter.model !== 'single-ek86752b') return;
@@ -1379,6 +1333,26 @@ function bindPanelEvents(root: HTMLElement): void {
     markDirty(root);
     recalc(root);
   });
+}
+
+function clearManualLevelInputLocks(): void {
+  state.manualEkInputKeys.clear();
+  state.manualImlInputKeys.clear();
+  state.manualEk52InputKeys.clear();
+}
+
+function runLevelInputAutoDetect(root: HTMLElement, missingTimingMessage: string, fill: () => string[]): void {
+  if (!state.project.timing) {
+    state.message = missingTimingMessage;
+    render(root);
+    return;
+  }
+  if (!state.project.simulation) state.project.simulation = simulateProject(state.project);
+  const changed = fill();
+  state.message = changed.length ? `已自动识别：${changed.join('，')}` : '没有新的空位可自动识别';
+  state.project.dirty = changed.length > 0;
+  if (changed.length) recalc(root);
+  else render(root);
 }
 
 function updateImlReg(root: HTMLElement, input: HTMLInputElement): void {
@@ -1539,13 +1513,13 @@ function updateEntry(root: HTMLElement, input: HTMLInputElement): void {
   const newValue = input.value.trim().toLowerCase().startsWith('0x') ? Number.parseInt(input.value, 16) : Number(input.value);
   if (!Number.isFinite(newValue)) return;
   if (field === 'pcnt' && state.project.timing && newValue > state.project.timing.pcntMax) {
-    alert(`PCNT=${newValue} 超过当前限制=${state.project.timing.pcntMax}`);
-    input.value = String(oldValue);
+    alert(`PCNT=${formatCount4(newValue)} 超过当前限制=${formatCount4(state.project.timing.pcntMax)}`);
+    input.value = field === 'pcnt' || field === 'lcnt' ? formatCount4(Number(oldValue)) : String(oldValue);
     return;
   }
   if (field === 'lcnt' && gpo.repeatMode === 0 && gpo.soc !== 'mt9603') {
     alert('Repeat_mode_SEL=0(by line) 不允许修改 LCNT');
-    input.value = String(oldValue);
+    input.value = formatCount4(Number(oldValue));
     return;
   }
   if (field === 'enabled') entry.enabled = newValue === 1;
@@ -1572,7 +1546,7 @@ function applyEdgeDragPatch(root: HTMLElement, drag: Extract<DragState, { mode: 
   const oldLcnt = entry.lcnt;
   const oldPcnt = entry.pcnt;
   if (nextPcnt > t.pcntMax) {
-    state.message = `拖动结果 PCNT=${nextPcnt} 超过当前限制 ${t.pcntMax}，未生成 patch`;
+    state.message = `拖动结果 PCNT=${formatCount4(nextPcnt)} 超过当前限制 ${formatCount4(t.pcntMax)}，未生成 patch`;
     render(root);
     return;
   }
@@ -1615,8 +1589,8 @@ function edgeDragPreviewText(drag: Extract<DragState, { mode: 'edge' }>): string
   const t = state.project.timing;
   if (!t) return '';
   const { nextLcnt, nextPcnt } = edgeDragNextPosition(drag);
-  const lcntChange = nextLcnt === drag.target.entry.lcnt ? '' : ` LCNT ${drag.target.entry.lcnt}->${nextLcnt}`;
-  const pcntChange = nextPcnt === drag.target.entry.pcnt ? '' : ` PCNT ${drag.target.entry.pcnt}->${nextPcnt}`;
+  const lcntChange = nextLcnt === drag.target.entry.lcnt ? '' : ` LCNT ${formatCount4(drag.target.entry.lcnt)}->${formatCount4(nextLcnt)}`;
+  const pcntChange = nextPcnt === drag.target.entry.pcnt ? '' : ` PCNT ${formatCount4(drag.target.entry.pcnt)}->${formatCount4(nextPcnt)}`;
   return `${edgePatchPath(drag.target)}；${formatPcnt(drag.originAt, t.pcntPerLine)} → ${formatPcnt(drag.previewAt, t.pcntPerLine)}；将写${lcntChange || ''}${pcntChange || ''}；松开生成 patch suggestion`;
 }
 
@@ -1697,26 +1671,7 @@ function setDefaultView(kind: ViewMode): void {
   if (!t || !sim) return;
   state.viewMode = kind;
   if (kind !== 'frame1' && kind !== 'frame120' && state.referenceSignalId && centerOnReference()) return;
-  const linePcnt = t.pcntPerLine;
-  const framePcnt = linePcnt * t.vtotal;
-  const span = linePcnt * 6;
-  const findEdge = (token: string) => sim.signals.find((s) => s.id.includes(token))?.edges[0]?.at;
-  const findLastEdge = (token: string) => {
-    const edges = sim.signals.filter((s) => s.id.includes(token)).flatMap((s) => s.edges);
-    return edges.at(-1)?.at;
-  };
-  const isIml7272b = state.project.levelShifter.model === 'single-iml7272b';
-  const isEk86752b = state.project.levelShifter.model === 'single-ek86752b';
-  const noLs = state.project.levelShifter.model === 'none';
-  let center = isIml7272b
-    ? findEdge('driver_tp') ?? findEdge('init_tp') ?? findImlInputEdge('clkIn1') ?? findImlInputEdge('clkIn2') ?? findEdge('ls:clk') ?? findEdge('ls:stv1') ?? 0
-    : isEk86752b
-      ? findEdge('cpv1') ?? findEdge('ls:clk1') ?? findEdge('ls:stv1') ?? 0
-    : noLs
-      ? findEdge('cpv1') ?? findEdge('cpv2') ?? findEdge('stv') ?? 0
-      : findEdge('driver_tp') ?? findEdge('init_tp') ?? findEdge('cpv1') ?? 0;
-  if (kind === 'head') center = isIml7272b ? findEdge('ls:stv1') ?? findImlInputEdge('stvIn1') ?? findEdge('ls:clk') ?? center : isEk86752b ? findEdge('ls:stv1') ?? findEdge('cpv1') ?? center : findEdge('stv') ?? center;
-  if (kind === 'tail') center = isIml7272b || isEk86752b ? findLastEdge('ls:clk') ?? Math.max(0, linePcnt * (t.vtotal - 6)) : findLastEdge('ck') ?? findEdge('cpv2') ?? Math.max(0, linePcnt * (t.vtotal - 6));
+  const framePcnt = t.pcntPerLine * t.vtotal;
   if (kind === 'frame1') {
     state.view = { start: 0, end: framePcnt };
     return;
@@ -1725,7 +1680,49 @@ function setDefaultView(kind: ViewMode): void {
     state.view = { start: 0, end: framePcnt * 120 };
     return;
   }
+  const span = t.pcntPerLine * 6;
+  const center = defaultViewCenter(kind, sim.signals, t.pcntPerLine, t.vtotal);
   state.view = { start: Math.max(0, center - span), end: Math.min(framePcnt, center + span) };
+}
+
+function defaultViewCenter(kind: ViewMode, signals: SignalTrace[], linePcnt: number, vtotal: number): number {
+  const firstEdge = (token: string) => signals.find((signal) => signal.id.includes(token))?.edges[0]?.at;
+  const lastEdge = (token: string) => signals.filter((signal) => signal.id.includes(token)).flatMap((signal) => signal.edges).at(-1)?.at;
+  const tailFallback = Math.max(0, linePcnt * (vtotal - 6));
+  if (kind === 'tail') {
+    return isLevelShifterClockMode()
+      ? lastEdge('ls:clk') ?? tailFallback
+      : lastEdge('ck') ?? firstEdge('cpv2') ?? tailFallback;
+  }
+  if (kind === 'head') return headViewCenter(firstEdge, fallbackViewCenter(firstEdge));
+  return fallbackViewCenter(firstEdge);
+}
+
+function headViewCenter(firstEdge: (token: string) => number | undefined, fallback: number): number {
+  const model = state.project.levelShifter.model;
+  if (model === 'single-iml7272b') return firstEdge('ls:stv1') ?? findImlInputEdge('stvIn1') ?? firstEdge('ls:clk') ?? fallback;
+  if (model === 'single-ek86752b') return firstEdge('driver_tp') ?? firstEdge('ls:stv1') ?? firstEdge('cpv1') ?? fallback;
+  return firstEdge('stv') ?? fallback;
+}
+
+function fallbackViewCenter(firstEdge: (token: string) => number | undefined): number {
+  return firstDefined(defaultCenterCandidates(firstEdge));
+}
+
+function defaultCenterCandidates(firstEdge: (token: string) => number | undefined): Array<number | undefined> {
+  const model = state.project.levelShifter.model;
+  if (model === 'single-iml7272b') return [firstEdge('driver_tp'), firstEdge('init_tp'), findImlInputEdge('clkIn1'), findImlInputEdge('clkIn2'), firstEdge('ls:clk'), firstEdge('ls:stv1'), 0];
+  if (model === 'single-ek86752b') return [firstEdge('driver_tp'), firstEdge('cpv1'), firstEdge('ls:clk1'), firstEdge('ls:stv1'), 0];
+  if (model === 'none') return [firstEdge('cpv1'), firstEdge('cpv2'), firstEdge('stv'), 0];
+  return [firstEdge('driver_tp'), firstEdge('init_tp'), firstEdge('cpv1'), 0];
+}
+
+function firstDefined(values: Array<number | undefined>): number {
+  return values.find((value) => value !== undefined) ?? 0;
+}
+
+function isLevelShifterClockMode(): boolean {
+  return state.project.levelShifter.model === 'single-iml7272b' || state.project.levelShifter.model === 'single-ek86752b';
 }
 
 function findImlInputEdge(key: keyof Iml7272bConfig['inputs']): number | undefined {
@@ -1915,160 +1912,167 @@ function mergeSegments(segments: SignalTrace['segments']): SignalTrace['segments
 function visibleSignalsForMode(): SignalTrace[] {
   const signals = state.project.simulation?.signals ?? [];
   if (signals.length === 0) return [];
+  if (state.viewMode === 'frame120') return addExtraSignals(pinReference(multiFrameSignals(120)));
+  const collector = createSignalCollector(signals);
+  if (state.viewMode === 'debug') return visibleDebugSignals(collector);
+  if (state.viewMode === 'head') return visibleHeadSignals(collector);
+  if (state.viewMode === 'tail') return visibleTailSignals(collector);
+  return visibleFrameSignals(collector);
+}
+
+type SignalCollector = {
+  ordered: SignalTrace[];
+  result: SignalTrace[];
+  push: (id: string | undefined) => void;
+  pushAll: (ids: Array<string | undefined>) => void;
+  pushCks: () => void;
+  finish: (fallback?: SignalTrace[]) => SignalTrace[];
+};
+
+const TP_CK_DEBUG_IDS = [
+  'driver_tp:raw',
+  'driver_tp:source',
+  'driver_tp:merge',
+  'init_tp:raw',
+  'init_tp:source',
+  'init_tp:merge',
+  'cpv1:raw',
+  'cpv1:source',
+  'cpv1:merge',
+  'cpv2:raw',
+  'cpv2:source',
+  'cpv2:merge',
+];
+
+function createSignalCollector(signals: SignalTrace[]): SignalCollector {
   const ordered = orderedSignals(signals);
   const byId = new Map([...ordered, ...(state.project.simulation?.gpoSignals ?? [])].map((signal) => [signal.id, signal]));
   const result: SignalTrace[] = [];
-  const isIml7272b = state.project.levelShifter.model === 'single-iml7272b';
-  const isEk86752b = state.project.levelShifter.model === 'single-ek86752b';
-  const push = (id: string) => {
-    const signal = byId.get(id);
-    if (signal && !result.some((item) => item.id === signal.id)) result.push(signal);
+  const push = (id: string | undefined) => {
+    const signal = id ? byId.get(id) : undefined;
+    if (signal) addUniqueSignal(result, signal);
   };
-  const pushCks = () => ordered.filter((signal) => isClockOutput(signal.id)).forEach((signal) => push(signal.id));
-  const pushImlInputs = () => {
-    if (state.project.levelShifter.model !== 'single-iml7272b') return;
-    Object.values(state.project.levelShifter.inputs).forEach((id) => { if (id) push(id); });
+  const collector: SignalCollector = {
+    ordered,
+    result,
+    push,
+    pushAll: (ids) => ids.forEach(push),
+    pushCks: () => ordered.filter((signal) => isClockOutput(signal.id)).forEach((signal) => push(signal.id)),
+    finish: (fallback = ordered) => addExtraSignals(pinReference(result.length > 0 ? result : fallback)),
   };
-  const pushImlHeadInputs = () => {
-    if (state.project.levelShifter.model !== 'single-iml7272b') return;
-    [
-      state.project.levelShifter.inputs.stvIn1,
-      state.project.levelShifter.inputs.stvIn2,
-      state.project.levelShifter.inputs.lcIn,
-      state.project.levelShifter.inputs.clkIn1,
-      state.project.levelShifter.inputs.clkIn2,
-      state.project.levelShifter.inputs.terminate,
-    ].forEach((id) => { if (id) push(id); });
-  };
-  const pushTpCkDebugBase = () => {
-    [
-      'driver_tp:raw',
-      'driver_tp:source',
-      'driver_tp:merge',
-      'init_tp:raw',
-      'init_tp:source',
-      'init_tp:merge',
-      'cpv1:raw',
-      'cpv1:source',
-      'cpv1:merge',
-      'cpv2:raw',
-      'cpv2:source',
-      'cpv2:merge',
-    ].forEach(push);
-  };
-  const pushImlClockInputsAfterBase = () => {
-    if (state.project.levelShifter.model !== 'single-iml7272b') return;
-    [state.project.levelShifter.inputs.clkIn1, state.project.levelShifter.inputs.clkIn2, state.project.levelShifter.inputs.terminate].forEach((id) => { if (id) push(id); });
-  };
-  const pushImlOutputs = () => {
-    ['ls:stv1', 'ls:stv2', 'ls:lc1', 'ls:lc2'].forEach(push);
-    pushCks();
-  };
-  const pushEk52Inputs = () => {
-    if (state.project.levelShifter.model !== 'single-ek86752b') return;
-    const ls = state.project.levelShifter;
-    ek52InputKeysForConfig(ls).forEach((key) => {
-      const id = ls.inputs[key];
-      if (id) push(id);
-    });
-  };
-  const pushEk52Outputs = () => {
-    ['ls:stv1', 'ls:stv2', 'ls:resetout', 'ls:lc1', 'ls:lc2'].forEach(push);
-    pushCks();
-  };
+  return collector;
+}
 
-  if (state.viewMode === 'debug') {
-    if (state.project.levelShifter.model === 'none') {
-      pushTpCkDebugBase();
-      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-    }
-    if (isIml7272b) {
-      pushTpCkDebugBase();
-      pushImlClockInputsAfterBase();
-      push('ls:clk1');
-      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-    }
-    if (isEk86752b) {
-      const ls = state.project.levelShifter;
-      if (ls.model === 'single-ek86752b') [ls.inputs.cpv1, ls.inputs.cpv2, ls.inputs.cpv3, ls.inputs.cpv4].forEach((id) => { if (id) push(id); });
-      push('ls:clk1');
-      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-    }
-    pushTpCkDebugBase();
-    push('ck1');
-    return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
+function visibleDebugSignals(c: SignalCollector): SignalTrace[] {
+  const ls = state.project.levelShifter;
+  if (ls.model === 'none') {
+    c.pushAll(TP_CK_DEBUG_IDS);
+    return c.finish();
   }
+  if (ls.model === 'single-iml7272b') {
+    c.pushAll(TP_CK_DEBUG_IDS);
+    c.pushAll([ls.inputs.clkIn1, ls.inputs.clkIn2, ls.inputs.terminate, 'ls:clk1']);
+    return c.finish();
+  }
+  if (ls.model === 'single-ek86752b') {
+    pushMt9603DriverTp(c);
+    c.pushAll([ls.inputs.cpv1, ls.inputs.cpv2, ls.inputs.cpv3, ls.inputs.cpv4, 'ls:clk1']);
+    return c.finish();
+  }
+  c.pushAll([...TP_CK_DEBUG_IDS, 'ck1']);
+  return c.finish();
+}
 
-  if (state.viewMode === 'head') {
-    if (state.project.levelShifter.model === 'none') {
-      ['stv:merge', 'cpv1:merge', 'cpv2:merge', 'lc:merge', 'pol:merge', 'rst:manual'].forEach(push);
-      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-    }
-    if (isIml7272b) {
-      pushImlHeadInputs();
-      pushImlOutputs();
-      ['rst:manual', 'pol:merge'].forEach(push);
-      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-    }
-    if (isEk86752b) {
-      pushEk52Inputs();
-      pushEk52Outputs();
-      ['pol:merge'].forEach(push);
-      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-    }
-    ['driver_tp:merge', 'init_tp:merge', 'stv:merge', 'cpv1:merge', 'cpv2:merge'].forEach(push);
-    pushCks();
-    ['rst:manual', 'pol:merge'].forEach(push);
-    return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
+function visibleHeadSignals(c: SignalCollector): SignalTrace[] {
+  const ls = state.project.levelShifter;
+  if (ls.model === 'none') {
+    c.pushAll(['stv:merge', 'cpv1:merge', 'cpv2:merge', 'lc:merge', 'pol:merge', 'rst:manual']);
+    return c.finish();
   }
+  if (ls.model === 'single-iml7272b') {
+    pushImlHeadInputs(c, ls);
+    pushImlOutputs(c);
+    c.pushAll(['rst:manual', 'pol:merge']);
+    return c.finish();
+  }
+  if (ls.model === 'single-ek86752b') {
+    pushMt9603DriverTp(c);
+    pushEk52Inputs(c, ls);
+    pushEk52Outputs(c);
+    c.push('pol:merge');
+    return c.finish();
+  }
+  c.pushAll(['driver_tp:merge', 'init_tp:merge', 'stv:merge', 'cpv1:merge', 'cpv2:merge']);
+  c.pushCks();
+  c.pushAll(['rst:manual', 'pol:merge']);
+  return c.finish();
+}
 
-  if (state.viewMode === 'tail') {
-    if (state.project.levelShifter.model === 'none') {
-      ['cpv1:merge', 'cpv2:merge', 'lc:merge', 'pol:merge', 'rst:manual'].forEach(push);
-      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-    }
-    if (isIml7272b) {
-      pushCks();
-      if (state.project.levelShifter.model === 'single-iml7272b' && state.project.levelShifter.inputs.terminate) push(state.project.levelShifter.inputs.terminate);
-      ['rst:manual'].forEach(push);
-      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-    }
-    if (isEk86752b) {
-      pushCks();
-      const ls = state.project.levelShifter;
-      if (ls.model === 'single-ek86752b' && !ek52IsFourInput(ls) && ls.inputs.terminate) push(ls.inputs.terminate);
-      push('ls:resetout');
-      return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-    }
-    pushCks();
-    if (state.project.levelShifter.model === 'dual-ek86707a') push('ter:manual');
-    else push('cpv2:merge');
-    push('rst:manual');
-    return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
+function visibleTailSignals(c: SignalCollector): SignalTrace[] {
+  const ls = state.project.levelShifter;
+  if (ls.model === 'none') {
+    c.pushAll(['cpv1:merge', 'cpv2:merge', 'lc:merge', 'pol:merge', 'rst:manual']);
+    return c.finish();
   }
+  if (ls.model === 'single-iml7272b') {
+    c.pushCks();
+    c.pushAll([ls.inputs.terminate, 'rst:manual']);
+    return c.finish();
+  }
+  if (ls.model === 'single-ek86752b') {
+    c.pushCks();
+    if (!ek52IsFourInput(ls)) c.push(ls.inputs.terminate);
+    c.push('ls:resetout');
+    return c.finish();
+  }
+  c.pushCks();
+  c.push(ls.model === 'dual-ek86707a' ? 'ter:manual' : 'cpv2:merge');
+  c.push('rst:manual');
+  return c.finish();
+}
 
-  if (state.viewMode === 'frame120') {
-    return addExtraSignals(pinReference(multiFrameSignals(120)));
+function visibleFrameSignals(c: SignalCollector): SignalTrace[] {
+  const ls = state.project.levelShifter;
+  if (ls.model === 'single-iml7272b') {
+    pushImlOutputs(c);
+    c.push('pol:merge');
+    return c.finish(c.ordered.filter((signal) => isClockOutput(signal.id)));
   }
+  if (ls.model === 'single-ek86752b') {
+    pushEk52Outputs(c);
+    c.push('pol:merge');
+    return c.finish(c.ordered.filter((signal) => isClockOutput(signal.id)));
+  }
+  if (ls.model === 'none') {
+    c.pushAll(['stv:merge', 'cpv1:merge', 'cpv2:merge', 'lc:merge', 'pol:merge']);
+    return c.finish();
+  }
+  c.push('stv:merge');
+  c.pushCks();
+  c.push('pol:merge');
+  return c.finish(c.ordered.filter((signal) => isClockOutput(signal.id)));
+}
 
-  if (isIml7272b) {
-    pushImlOutputs();
-    ['pol:merge'].forEach(push);
-    return addExtraSignals(pinReference(result.length > 0 ? result : ordered.filter((signal) => isClockOutput(signal.id))));
-  }
-  if (isEk86752b) {
-    pushEk52Outputs();
-    ['pol:merge'].forEach(push);
-    return addExtraSignals(pinReference(result.length > 0 ? result : ordered.filter((signal) => isClockOutput(signal.id))));
-  }
-  if (state.project.levelShifter.model === 'none') {
-    ['stv:merge', 'cpv1:merge', 'cpv2:merge', 'lc:merge', 'pol:merge'].forEach(push);
-    return addExtraSignals(pinReference(result.length > 0 ? result : ordered));
-  }
-  ['stv:merge'].forEach(push);
-  pushCks();
-  ['pol:merge'].forEach(push);
-  return addExtraSignals(pinReference(result.length > 0 ? result : ordered.filter((signal) => isClockOutput(signal.id))));
+function pushImlHeadInputs(c: SignalCollector, ls: Iml7272bConfig): void {
+  c.pushAll([ls.inputs.stvIn1, ls.inputs.stvIn2, ls.inputs.lcIn, ls.inputs.clkIn1, ls.inputs.clkIn2, ls.inputs.terminate]);
+}
+
+function pushImlOutputs(c: SignalCollector): void {
+  c.pushAll(['ls:stv1', 'ls:stv2', 'ls:lc1', 'ls:lc2']);
+  c.pushCks();
+}
+
+function pushEk52Inputs(c: SignalCollector, ls: Ek86752bConfig): void {
+  ek52InputKeysForConfig(ls).forEach((key) => c.push(ls.inputs[key]));
+}
+
+function pushMt9603DriverTp(c: SignalCollector): void {
+  if (state.project.timing?.soc === 'mt9603') c.push('driver_tp:merge');
+}
+
+function pushEk52Outputs(c: SignalCollector): void {
+  c.pushAll(['ls:stv1', 'ls:stv2', 'ls:resetout', 'ls:lc1', 'ls:lc2']);
+  c.pushCks();
 }
 
 function pinReference(signals: SignalTrace[]): SignalTrace[] {
@@ -2170,10 +2174,7 @@ function pulseSummary(segments: SignalTrace['segments'], timing: DraftProject['t
 function orderedSignals(signals: SignalTrace[]): SignalTrace[] {
   const byId = new Map(signals.map((signal) => [signal.id, signal]));
   const result: SignalTrace[] = [];
-  const push = (id: string) => {
-    const signal = byId.get(id);
-    if (signal && !result.some((item) => item.id === signal.id)) result.push(signal);
-  };
+  const push = (id: string) => addUniqueSignal(result, byId.get(id));
   [
     'driver_tp:raw',
     'driver_tp:source',
@@ -2207,6 +2208,10 @@ function orderedSignals(signals: SignalTrace[]): SignalTrace[] {
     .forEach((signal) => push(signal.id));
   for (const signal of signals) push(signal.id);
   return result;
+}
+
+function addUniqueSignal(result: SignalTrace[], signal: SignalTrace | undefined): void {
+  if (signal && !result.some((item) => item.id === signal.id)) result.push(signal);
 }
 
 function isClockOutput(id: string): boolean {
@@ -2256,7 +2261,7 @@ function formatTargetDelta(m: NonNullable<DraftProject['simulation']>['measureme
   const absPcnt = Math.abs(m.errorPcnt);
   const lcnt = state.project.timing ? Math.trunc(absPcnt / state.project.timing.pcntPerLine) : 0;
   const pcnt = state.project.timing ? absPcnt % state.project.timing.pcntPerLine : absPcnt;
-  return `${sign} ${formatDuration(Math.abs(m.errorSeconds))}<br>${m.errorPcnt >= 0 ? '+' : '-'}${absPcnt} pcnt (${m.errorPcnt >= 0 ? '+' : '-'}${lcnt}lcnt ${pcnt}pcnt)`;
+  return `${sign} ${formatDuration(Math.abs(m.errorSeconds))}<br>${m.errorPcnt >= 0 ? '+' : '-'}${absPcnt} pcnt (${m.errorPcnt >= 0 ? '+' : '-'}${formatCount4(lcnt)}lcnt ${formatCount4(pcnt)}pcnt)`;
 }
 
 function selectedReferenceEdge(): Edge | undefined {
@@ -2419,84 +2424,95 @@ async function importLevelShifterJson(root: HTMLElement, input: HTMLInputElement
 function parseLevelShifterConfig(value: unknown): LevelShifterConfig | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const source = value as Record<string, unknown>;
-  if (source.model === 'single-iml7272b') {
-    const defaults = defaultIml7272bConfig();
-    const rawInputs = source.inputs && typeof source.inputs === 'object' ? source.inputs as Record<string, unknown> : {};
-    return {
-      model: 'single-iml7272b',
-      reg01: parseConfigByte(source.reg01, defaults.reg01),
-      reg02: parseConfigByte(source.reg02, defaults.reg02),
-      reg03: parseConfigByte(source.reg03, defaults.reg03),
-      reg04: parseConfigByte(source.reg04, defaults.reg04),
-      inputs: {
-        stvIn1: stringOrUndefined(rawInputs.stvIn1),
-        stvIn2: stringOrUndefined(rawInputs.stvIn2),
-        clkIn1: stringOrUndefined(rawInputs.clkIn1),
-        clkIn2: stringOrUndefined(rawInputs.clkIn2),
-        lcIn: stringOrUndefined(rawInputs.lcIn),
-        terminate: stringOrUndefined(rawInputs.terminate),
-      },
-    };
-  }
-  if (source.model === 'single-ek86707a' || source.model === 'dual-ek86707a') {
-    const defaults = source.model === 'dual-ek86707a' ? defaultDualEk86707aConfig() : defaultLevelShifterConfig();
-    const rawInputs = source.inputs && typeof source.inputs === 'object' ? source.inputs as Record<string, unknown> : {};
-    const set1 = parseEkSet1Level(source.set1, defaults.set1);
-    return {
-      model: source.model,
-      set1,
-      set2: Boolean(source.set2 ?? defaults.set2),
-      set3: Boolean(source.set3 ?? defaults.set3),
-      dualSto: Boolean(source.dualSto ?? defaults.dualSto),
-      ocpEnabled: Boolean(source.ocpEnabled ?? defaults.ocpEnabled),
-      ocpSel: source.ocpSel === '0' || source.ocpSel === '1' || source.ocpSel === 'float' ? source.ocpSel : defaults.ocpSel,
-      mode1: source.mode1 === 'high' || source.mode1 === 'normal' || source.mode1 === 'extra-high' || source.mode1 === 'low' ? source.mode1 : defaults.mode1,
-      mode2: source.mode2 === '1' ? '1' : defaults.mode2,
-      outputCount: ek86707aSet1OutputCount(set1),
-      inputs: {
-        driverTp: stringOrUndefined(rawInputs.driverTp),
-        initTp: stringOrUndefined(rawInputs.initTp),
-        stv: stringOrUndefined(rawInputs.stv),
-        cpv1: stringOrUndefined(rawInputs.cpv1),
-        cpv2: stringOrUndefined(rawInputs.cpv2),
-        ter: stringOrUndefined(rawInputs.ter),
-        rst: stringOrUndefined(rawInputs.rst),
-        pol: stringOrUndefined(rawInputs.pol),
-      },
-    };
-  }
-  if (source.model === 'single-ek86752b') {
-    const defaults = defaultEk86752bConfig();
-    const rawInputs = source.inputs && typeof source.inputs === 'object' ? source.inputs as Record<string, unknown> : {};
-    return {
-      model: 'single-ek86752b',
-      reg00: parseConfigByte(source.reg00, defaults.reg00),
-      reg01: parseConfigByte(source.reg01, defaults.reg01),
-      reg02: parseConfigByte(source.reg02, defaults.reg02),
-      reg03: parseConfigByte(source.reg03, defaults.reg03),
-      reg04: parseConfigByte(source.reg04, defaults.reg04),
-      reg05: parseConfigByte(source.reg05, defaults.reg05),
-      reg06: parseConfigByte(source.reg06, defaults.reg06),
-      reg07: parseConfigByte(source.reg07, defaults.reg07),
-      reg08: parseConfigByte(source.reg08, defaults.reg08),
-      reg09: parseConfigByte(source.reg09, defaults.reg09),
-      reg0a: parseConfigByte(source.reg0a, defaults.reg0a),
-      reg0b: parseConfigByte(source.reg0b, defaults.reg0b),
-      inputs: {
-        stv1: stringOrUndefined(rawInputs.stv1),
-        stv2: stringOrUndefined(rawInputs.stv2),
-        reset: stringOrUndefined(rawInputs.reset),
-        cpv1: stringOrUndefined(rawInputs.cpv1),
-        cpv2: stringOrUndefined(rawInputs.cpv2),
-        cpv3: stringOrUndefined(rawInputs.cpv3),
-        cpv4: stringOrUndefined(rawInputs.cpv4),
-        terminate: stringOrUndefined(rawInputs.terminate),
-        lcIn1: stringOrUndefined(rawInputs.lcIn1),
-        lcIn2: stringOrUndefined(rawInputs.lcIn2),
-      },
-    };
-  }
+  if (source.model === 'single-iml7272b') return parseIml7272bConfig(source);
+  if (source.model === 'single-ek86707a' || source.model === 'dual-ek86707a') return parseEk86707aConfig(source);
+  if (source.model === 'single-ek86752b') return parseEk86752bConfig(source);
   return undefined;
+}
+
+function rawInputsOf(source: Record<string, unknown>): Record<string, unknown> {
+  return source.inputs && typeof source.inputs === 'object' ? source.inputs as Record<string, unknown> : {};
+}
+
+function parseIml7272bConfig(source: Record<string, unknown>): Iml7272bConfig {
+  const defaults = defaultIml7272bConfig();
+  const rawInputs = rawInputsOf(source);
+  return {
+    model: 'single-iml7272b',
+    reg01: parseConfigByte(source.reg01, defaults.reg01),
+    reg02: parseConfigByte(source.reg02, defaults.reg02),
+    reg03: parseConfigByte(source.reg03, defaults.reg03),
+    reg04: parseConfigByte(source.reg04, defaults.reg04),
+    inputs: {
+      stvIn1: stringOrUndefined(rawInputs.stvIn1),
+      stvIn2: stringOrUndefined(rawInputs.stvIn2),
+      clkIn1: stringOrUndefined(rawInputs.clkIn1),
+      clkIn2: stringOrUndefined(rawInputs.clkIn2),
+      lcIn: stringOrUndefined(rawInputs.lcIn),
+      terminate: stringOrUndefined(rawInputs.terminate),
+    },
+  };
+}
+
+function parseEk86707aConfig(source: Record<string, unknown>): Ek86707aConfig | DualEk86707aConfig {
+  const model = source.model === 'dual-ek86707a' ? 'dual-ek86707a' : 'single-ek86707a';
+  const defaults = model === 'dual-ek86707a' ? defaultDualEk86707aConfig() : defaultLevelShifterConfig();
+  const rawInputs = rawInputsOf(source);
+  const set1 = parseEkSet1Level(source.set1, defaults.set1);
+  return {
+    model,
+    set1,
+    set2: Boolean(source.set2 ?? defaults.set2),
+    set3: Boolean(source.set3 ?? defaults.set3),
+    dualSto: Boolean(source.dualSto ?? defaults.dualSto),
+    ocpEnabled: Boolean(source.ocpEnabled ?? defaults.ocpEnabled),
+    ocpSel: source.ocpSel === '0' || source.ocpSel === '1' || source.ocpSel === 'float' ? source.ocpSel : defaults.ocpSel,
+    mode1: source.mode1 === 'high' || source.mode1 === 'normal' || source.mode1 === 'extra-high' || source.mode1 === 'low' ? source.mode1 : defaults.mode1,
+    mode2: source.mode2 === '1' ? '1' : defaults.mode2,
+    outputCount: ek86707aSet1OutputCount(set1),
+    inputs: {
+      driverTp: stringOrUndefined(rawInputs.driverTp),
+      initTp: stringOrUndefined(rawInputs.initTp),
+      stv: stringOrUndefined(rawInputs.stv),
+      cpv1: stringOrUndefined(rawInputs.cpv1),
+      cpv2: stringOrUndefined(rawInputs.cpv2),
+      ter: stringOrUndefined(rawInputs.ter),
+      rst: stringOrUndefined(rawInputs.rst),
+      pol: stringOrUndefined(rawInputs.pol),
+    },
+  };
+}
+
+function parseEk86752bConfig(source: Record<string, unknown>): Ek86752bConfig {
+  const defaults = defaultEk86752bConfig();
+  const rawInputs = rawInputsOf(source);
+  return {
+    model: 'single-ek86752b',
+    reg00: parseConfigByte(source.reg00, defaults.reg00),
+    reg01: parseConfigByte(source.reg01, defaults.reg01),
+    reg02: parseConfigByte(source.reg02, defaults.reg02),
+    reg03: parseConfigByte(source.reg03, defaults.reg03),
+    reg04: parseConfigByte(source.reg04, defaults.reg04),
+    reg05: parseConfigByte(source.reg05, defaults.reg05),
+    reg06: parseConfigByte(source.reg06, defaults.reg06),
+    reg07: parseConfigByte(source.reg07, defaults.reg07),
+    reg08: parseConfigByte(source.reg08, defaults.reg08),
+    reg09: parseConfigByte(source.reg09, defaults.reg09),
+    reg0a: parseConfigByte(source.reg0a, defaults.reg0a),
+    reg0b: parseConfigByte(source.reg0b, defaults.reg0b),
+    inputs: {
+      stv1: stringOrUndefined(rawInputs.stv1),
+      stv2: stringOrUndefined(rawInputs.stv2),
+      reset: stringOrUndefined(rawInputs.reset),
+      cpv1: stringOrUndefined(rawInputs.cpv1),
+      cpv2: stringOrUndefined(rawInputs.cpv2),
+      cpv3: stringOrUndefined(rawInputs.cpv3),
+      cpv4: stringOrUndefined(rawInputs.cpv4),
+      terminate: stringOrUndefined(rawInputs.terminate),
+      lcIn1: stringOrUndefined(rawInputs.lcIn1),
+      lcIn2: stringOrUndefined(rawInputs.lcIn2),
+    },
+  };
 }
 
 function parseTpGeneratorConfig(value: unknown): TpGeneratorConfig {
@@ -2578,7 +2594,7 @@ function exportHtmlReport(root: HTMLElement): void {
   <div class="card">
     <h2>Measurement</h2>
     <table><thead><tr><th>ID</th><th>Start</th><th>End</th><th>Delta</th><th>Target</th><th>当前-目标</th></tr></thead><tbody>
-      ${measurements.map((m) => `<tr><td>${htmlText(m.id)}</td><td>${htmlText(edgeLabel(m.startEdge))}</td><td>${htmlText(edgeLabel(m.endEdge))}</td><td>${m.deltaPcnt ?? '-'} pcnt / ${htmlText(formatDuration(m.seconds))}</td><td>${htmlText(formatDuration(m.targetSeconds))}</td><td>${safeBreaks(formatTargetDelta(m))}</td></tr>`).join('')}
+      ${measurements.map((m) => `<tr><td>${htmlText(m.id)}</td><td>${htmlText(edgeLabel(m.startEdge))}</td><td>${htmlText(edgeLabel(m.endEdge))}</td><td>${safeBreaks(formatMeasurementPcnt(m.deltaPcnt))} / ${htmlText(formatDuration(m.seconds))}</td><td>${htmlText(formatDuration(m.targetSeconds))}</td><td>${safeBreaks(formatTargetDelta(m))}</td></tr>`).join('')}
     </tbody></table>
   </div>
   <div class="card">

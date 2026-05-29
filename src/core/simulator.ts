@@ -1,6 +1,6 @@
 import { defaultTpGeneratorConfig, ek86707aSet1OutputCount } from './types';
 import type { CombinType, DraftProject, Edge, DualEk86707aConfig, Ek86707aConfig, Ek86707aCommonConfig, Ek86752bConfig, GpoConfig, Iml7272bConfig, LogicLevel, MeasurementResult, Segment, SignalFamily, SignalTrace, SimulationResult, TerCpv2Inference, TimingBase, TpGeneratorConfig } from './types';
-import { absPcnt } from './time';
+import { absPcnt, formatCount4 } from './time';
 
 const COLORS = [
   '#7fa6bd',
@@ -147,7 +147,7 @@ function parseDurationToPcnt(value: string, timing: TimingBase, fallbackSeconds:
   return Math.max(1, Math.round((amount * scale) / timing.pcntSeconds));
 }
 
-export function simulateGpoBase(gpo: GpoConfig, timing: TimingBase, bypassMask: boolean): Segment[] {
+function simulateGpoBase(gpo: GpoConfig, timing: TimingBase, bypassMask: boolean): Segment[] {
   return simulateGpoWindow(gpo, timing, bypassMask, 1);
 }
 
@@ -442,7 +442,7 @@ function buildGpoSignals(gpos: GpoConfig[], raw: Map<number, SignalTrace>, merge
   return out.map((signal) => ({ ...signal, edges: extractEdges(signal.id, signal.name, signal.segments, signal.sourceGpo) }));
 }
 
-export function inferTerCpv2(cpv2GpoIndex: number | undefined, gpos: GpoConfig[], ocpSel: string): TerCpv2Inference {
+function inferTerCpv2(cpv2GpoIndex: number | undefined, gpos: GpoConfig[], ocpSel: string): TerCpv2Inference {
   const cpv2 = gpos.find((g) => g.index === cpv2GpoIndex);
   if (!cpv2) return { role: 'UNKNOWN', severity: 'warn', message: '未找到 CPV2 GPO，无法判定 TER/CPV2 复用。' };
   const ocpIsOne = ocpSel === '1';
@@ -729,49 +729,37 @@ type Ek52FourInputSignals = {
   cpv3?: SignalTrace;
   cpv4?: SignalTrace;
 };
+type Ek52Event = { at: number; type: string };
+type Ek52ActiveChannels = ReturnType<typeof ek52ActiveChannels>;
+type Ek52FourInputState = {
+  oddIndex: number;
+  evenIndex: number;
+  oddArmed: boolean;
+  evenArmed: boolean;
+};
 
 function expandEk52TwoInputClocks(config: Ek86752bConfig, signals: Ek52TwoInputSignals, total: number): Segment[][] {
   const sequence = ek52TwoInputSequence(config);
   const highs: Segment[][] = Array.from({ length: 12 }, () => []);
   const active = new Map<number, number>();
+  const channels = ek52ActiveChannels(highs, active);
   let highIndex = 0;
   let lowIndex = 0;
   let armed = risingTimesOf(signals.stv1, total).length === 0;
   let inhibited = false;
 
-  const events = [
-    ...risingTimesOf(signals.stv1, total).map((at) => ({ at, type: 'stv1' as const })),
-    ...risingTimesOf(signals.stv2, total).map((at) => ({ at, type: 'stv2' as const })),
-    ...risingTimesOf(signals.reset, total).map((at) => ({ at, type: 'reset' as const })),
-    ...ek52HighEvents(config, signals.cpv1, total).map((at) => ({ at, type: 'high' as const })),
-    ...ek52TwoInputLowEvents(config, signals.cpv2, total).map((at) => ({ at, type: 'low' as const })),
-    ...risingTimesOf(signals.terminate, total).map((at) => ({ at, type: 'term' as const })),
-  ].sort((a, b) => a.at - b.at || ek52EventRank(a.type) - ek52EventRank(b.type));
-
-  const closeAll = (at: number, source: string) => {
-    for (const [channel, start] of [...active.entries()]) {
-      if (at > start) highs[channel].push({ start, end: at, level: 1, source });
-      active.delete(channel);
-    }
-  };
-  const setGroupHigh = (group: number[], at: number) => {
-    for (const channel of group) {
-      const existing = active.get(channel);
-      if (existing !== undefined && at > existing) highs[channel].push({ start: existing, end: at, level: 1, source: 'ek86752b-overlap-close' });
-      active.set(channel, at);
-    }
-  };
-  const setGroupLow = (group: number[], at: number) => {
-    for (const channel of group) {
-      const start = active.get(channel);
-      if (start !== undefined && at > start) highs[channel].push({ start, end: at, level: 1, source: 'ek86752b-2cpv' });
-      active.delete(channel);
-    }
-  };
+  const events = ek52SortedEvents([
+    ['stv1', risingTimesOf(signals.stv1, total)],
+    ['stv2', risingTimesOf(signals.stv2, total)],
+    ['reset', risingTimesOf(signals.reset, total)],
+    ['high', ek52HighEvents(config, signals.cpv1, total)],
+    ['low', ek52TwoInputLowEvents(config, signals.cpv2, total)],
+    ['term', risingTimesOf(signals.terminate, total)],
+  ]);
 
   for (const event of events) {
     if (event.type === 'stv1') {
-      closeAll(event.at, 'ek86752b-stv1-reset');
+      channels.closeAll(event.at, 'ek86752b-stv1-reset');
       highIndex = 0;
       lowIndex = 0;
       armed = true;
@@ -779,32 +767,32 @@ function expandEk52TwoInputClocks(config: Ek86752bConfig, signals: Ek52TwoInputS
       continue;
     }
     if (event.type === 'stv2' && ek52Stv2Reset(config)) {
-      closeAll(event.at, 'ek86752b-stv2-reset');
+      channels.closeAll(event.at, 'ek86752b-stv2-reset');
       continue;
     }
     if (event.type === 'reset' && ek52ResetOutReset(config)) {
-      closeAll(event.at, 'ek86752b-resetout-reset');
+      channels.closeAll(event.at, 'ek86752b-resetout-reset');
       continue;
     }
     if (event.type === 'term') {
-      if (!ek52TermMode(config)) closeAll(event.at, 'ek86752b-terminate');
+      if (!ek52TermMode(config)) channels.closeAll(event.at, 'ek86752b-terminate');
       inhibited = true;
       continue;
     }
     if (!armed || inhibited || sequence.length === 0) continue;
     if (event.type === 'high') {
       const group = sequence[highIndex % sequence.length];
-      setGroupHigh(group, event.at);
+      channels.open(group, event.at);
       highIndex += 1;
       continue;
     }
     if (event.type === 'low') {
       const group = sequence[lowIndex % sequence.length];
-      setGroupLow(group, event.at);
+      channels.close(group, event.at, 'ek86752b-2cpv');
       lowIndex += 1;
     }
   }
-  closeAll(total, 'ek86752b-frame-end');
+  channels.closeAll(total, 'ek86752b-frame-end');
   return highs.map((segments) => highPulsesToSegments(segments, total, 'ek86752b-low'));
 }
 
@@ -812,86 +800,104 @@ function expandEk52FourInputClocks(config: Ek86752bConfig, signals: Ek52FourInpu
   const { odd, even } = ek52FourInputSequences(config);
   const highs: Segment[][] = Array.from({ length: 12 }, () => []);
   const active = new Map<number, number>();
+  const channels = ek52ActiveChannels(highs, active);
   const stv12Ctrl = ek52Stv12ClkCtrl(config);
-  let oddIndex = 0;
-  let evenIndex = 0;
-  let oddArmed = stv12Ctrl ? risingTimesOf(signals.stv1, total).length === 0 : risingTimesOf(signals.stv1, total).length === 0;
-  let evenArmed = stv12Ctrl ? risingTimesOf(signals.stv2, total).length === 0 : risingTimesOf(signals.stv1, total).length === 0;
+  const state: Ek52FourInputState = {
+    oddIndex: 0,
+    evenIndex: 0,
+    oddArmed: risingTimesOf(signals.stv1, total).length === 0,
+    evenArmed: stv12Ctrl ? risingTimesOf(signals.stv2, total).length === 0 : risingTimesOf(signals.stv1, total).length === 0,
+  };
 
-  const events = [
-    ...risingTimesOf(signals.stv1, total).map((at) => ({ at, type: 'stv1' as const })),
-    ...risingTimesOf(signals.stv2, total).map((at) => ({ at, type: 'stv2' as const })),
-    ...risingTimesOf(signals.reset, total).map((at) => ({ at, type: 'reset' as const })),
-    ...risingTimesOf(signals.cpv1, total).map((at) => ({ at, type: 'oddHigh' as const })),
-    ...ek52LowEvents(config, signals.cpv2, total).map((at) => ({ at, type: 'oddLow' as const })),
-    ...risingTimesOf(signals.cpv3, total).map((at) => ({ at, type: 'evenHigh' as const })),
-    ...ek52LowEvents(config, signals.cpv4, total).map((at) => ({ at, type: 'evenLow' as const })),
-  ].sort((a, b) => a.at - b.at || ek52EventRank(a.type) - ek52EventRank(b.type));
+  const events = ek52SortedEvents([
+    ['stv1', risingTimesOf(signals.stv1, total)],
+    ['stv2', risingTimesOf(signals.stv2, total)],
+    ['reset', risingTimesOf(signals.reset, total)],
+    ['oddHigh', risingTimesOf(signals.cpv1, total)],
+    ['oddLow', ek52LowEvents(config, signals.cpv2, total)],
+    ['evenHigh', risingTimesOf(signals.cpv3, total)],
+    ['evenLow', ek52LowEvents(config, signals.cpv4, total)],
+  ]);
 
-  const closeGroup = (group: number[], at: number, source: string) => {
+  for (const event of events) {
+    applyEk52FourInputEvent(event, { odd, even }, state, channels, config, stv12Ctrl);
+  }
+  channels.closeAll(total, 'ek86752b-frame-end');
+  return highs.map((segments) => highPulsesToSegments(segments, total, 'ek86752b-low'));
+}
+
+function applyEk52FourInputEvent(
+  event: Ek52Event,
+  sequences: { odd: number[][]; even: number[][] },
+  state: Ek52FourInputState,
+  channels: Ek52ActiveChannels,
+  config: Ek86752bConfig,
+  stv12Ctrl: boolean,
+): void {
+  if (event.type === 'stv1') return resetEk52OddSide(event.at, state, channels, config, stv12Ctrl);
+  if (event.type === 'stv2') return resetEk52EvenSide(event.at, state, channels, config, stv12Ctrl);
+  if (event.type === 'reset' && ek52ResetOutReset(config)) return channels.closeAll(event.at, 'ek86752b-resetout-reset');
+  if (event.type === 'oddHigh') return openEk52Side(sequences.odd, state.oddIndex, state.oddArmed, event.at, channels);
+  if (event.type === 'oddLow') state.oddIndex = closeEk52Side(sequences.odd, state.oddIndex, state.oddArmed, event.at, channels, 'ek86752b-4cpv-odd');
+  if (event.type === 'evenHigh') return openEk52Side(sequences.even, state.evenIndex, state.evenArmed, event.at, channels);
+  if (event.type === 'evenLow') state.evenIndex = closeEk52Side(sequences.even, state.evenIndex, state.evenArmed, event.at, channels, 'ek86752b-4cpv-even');
+}
+
+function resetEk52OddSide(at: number, state: Ek52FourInputState, channels: Ek52ActiveChannels, config: Ek86752bConfig, stv12Ctrl: boolean): void {
+  if (ek52Stv1Reset(config)) channels.closeAll(at, 'ek86752b-stv1-reset');
+  state.oddIndex = 0;
+  state.oddArmed = true;
+  if (!stv12Ctrl) {
+    state.evenIndex = 0;
+    state.evenArmed = true;
+  }
+}
+
+function resetEk52EvenSide(at: number, state: Ek52FourInputState, channels: Ek52ActiveChannels, config: Ek86752bConfig, stv12Ctrl: boolean): void {
+  if (ek52Stv2Reset(config)) channels.closeAll(at, 'ek86752b-stv2-reset');
+  if (stv12Ctrl) {
+    state.evenIndex = 0;
+    state.evenArmed = true;
+  }
+}
+
+function openEk52Side(sequence: number[][], index: number, armed: boolean, at: number, channels: Ek52ActiveChannels): void {
+  if (armed && sequence.length > 0) channels.open(sequence[index % sequence.length], at);
+}
+
+function closeEk52Side(sequence: number[][], index: number, armed: boolean, at: number, channels: Ek52ActiveChannels, source: string): number {
+  if (!armed || sequence.length === 0) return index;
+  channels.close(sequence[index % sequence.length], at, source);
+  return index + 1;
+}
+
+function ek52ActiveChannels(highs: Segment[][], active: Map<number, number>) {
+  const close = (group: number[], at: number, source: string) => {
     for (const channel of group) {
       const start = active.get(channel);
       if (start !== undefined && at > start) highs[channel].push({ start, end: at, level: 1, source });
       active.delete(channel);
     }
   };
-  const closeAll = (at: number, source: string) => {
-    for (const [channel, start] of [...active.entries()]) {
-      if (at > start) highs[channel].push({ start, end: at, level: 1, source });
-      active.delete(channel);
-    }
+  return {
+    open(group: number[], at: number) {
+      for (const channel of group) {
+        const existing = active.get(channel);
+        if (existing !== undefined && at > existing) highs[channel].push({ start: existing, end: at, level: 1, source: 'ek86752b-overlap-close' });
+        active.set(channel, at);
+      }
+    },
+    close,
+    closeAll(at: number, source: string) {
+      close([...active.keys()], at, source);
+    },
   };
-  const openGroup = (group: number[], at: number) => {
-    for (const channel of group) {
-      const existing = active.get(channel);
-      if (existing !== undefined && at > existing) highs[channel].push({ start: existing, end: at, level: 1, source: 'ek86752b-overlap-close' });
-      active.set(channel, at);
-    }
-  };
+}
 
-  for (const event of events) {
-    if (event.type === 'stv1') {
-      if (ek52Stv1Reset(config)) closeAll(event.at, 'ek86752b-stv1-reset');
-      oddIndex = 0;
-      oddArmed = true;
-      if (!stv12Ctrl) {
-        evenIndex = 0;
-        evenArmed = true;
-      }
-      continue;
-    }
-    if (event.type === 'stv2') {
-      if (ek52Stv2Reset(config)) closeAll(event.at, 'ek86752b-stv2-reset');
-      if (stv12Ctrl) {
-        evenIndex = 0;
-        evenArmed = true;
-      }
-      continue;
-    }
-    if (event.type === 'reset' && ek52ResetOutReset(config)) {
-      closeAll(event.at, 'ek86752b-resetout-reset');
-      continue;
-    }
-    if (event.type === 'oddHigh' && oddArmed && odd.length > 0) {
-      openGroup(odd[oddIndex % odd.length], event.at);
-      continue;
-    }
-    if (event.type === 'oddLow' && oddArmed && odd.length > 0) {
-      closeGroup(odd[oddIndex % odd.length], event.at, 'ek86752b-4cpv-odd');
-      oddIndex += 1;
-      continue;
-    }
-    if (event.type === 'evenHigh' && evenArmed && even.length > 0) {
-      openGroup(even[evenIndex % even.length], event.at);
-      continue;
-    }
-    if (event.type === 'evenLow' && evenArmed && even.length > 0) {
-      closeGroup(even[evenIndex % even.length], event.at, 'ek86752b-4cpv-even');
-      evenIndex += 1;
-    }
-  }
-  closeAll(total, 'ek86752b-frame-end');
-  return highs.map((segments) => highPulsesToSegments(segments, total, 'ek86752b-low'));
+function ek52SortedEvents(entries: Array<[string, number[]]>): Ek52Event[] {
+  return entries
+    .flatMap(([type, times]) => times.map((at) => ({ at, type })))
+    .sort((a, b) => a.at - b.at || ek52EventRank(a.type) - ek52EventRank(b.type));
 }
 
 function ek52TwoInputSequence(config: Ek86752bConfig): number[][] {
@@ -1127,10 +1133,7 @@ function sourceRank(sourceKey: string): number {
 
 function imlChannelsForNormalWindow(mode: 'one-line' | 'two-line-mode1' | 'two-line-mode2', phaseCount: number, slot: number): number[] {
   if (mode === 'one-line') return [slot % phaseCount];
-  const pairCount = Math.max(1, Math.floor(phaseCount / 2));
-  const pair = slot % pairCount;
-  if (mode === 'two-line-mode1') return [pair * 2, pair * 2 + 1].filter((index) => index < phaseCount);
-  return [pair, pair + pairCount].filter((index) => index < phaseCount);
+  return imlTwoLineChannels(mode, phaseCount, slot, true);
 }
 
 function imlChannelsForPulse(
@@ -1139,12 +1142,16 @@ function imlChannelsForPulse(
   slot: number,
 ): number[] {
   if (mode === 'one-line') return [slot % phaseCount];
-  const pairCount = Math.max(1, Math.floor(phaseCount / 2));
-  const pair = slot % pairCount;
-  if (mode === 'two-line-mode1') return [pair * 2, pair * 2 + 1];
-  if (mode === 'two-line-mode2') return [pair, pair + pairCount];
+  if (mode === 'two-line-mode1' || mode === 'two-line-mode2') return imlTwoLineChannels(mode, phaseCount, slot, false);
   if (mode === 'hsr1') return [oddEvenPhaseOrder(phaseCount)[slot % phaseCount]];
   return [slot % phaseCount];
+}
+
+function imlTwoLineChannels(mode: 'two-line-mode1' | 'two-line-mode2', phaseCount: number, slot: number, clampToPhase: boolean): number[] {
+  const pairCount = Math.max(1, Math.floor(phaseCount / 2));
+  const pair = slot % pairCount;
+  const channels = mode === 'two-line-mode1' ? [pair * 2, pair * 2 + 1] : [pair, pair + pairCount];
+  return clampToPhase ? channels.filter((index) => index < phaseCount) : channels;
 }
 
 function oddEvenPhaseOrder(phaseCount: number): number[] {
@@ -1232,8 +1239,8 @@ function validateGpos(gpos: GpoConfig[], timing: TimingBase): string[] {
       if (end <= start) warnings.push(`${gpo.group}: mask gate end <= start，Region_VST/PST 与 Region_VEND/PEND 组合无有效窗口。`);
     }
     for (const entry of gpo.entries) {
-      if (entry.pcnt > timing.pcntMax) warnings.push(`${gpo.group} entry${entry.index}: PCNT=${entry.pcnt} 超过 ${timing.soc === 'mt9603' ? 'MT9603 限制' : 'Htotal'}=${timing.pcntMax}。`);
-      if (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && entry.lcnt !== 0) warnings.push(`${gpo.group} entry${entry.index}: Repeat_mode_SEL=0(by line)，LCNT=${entry.lcnt} 不应作为调参目标。`);
+      if (entry.pcnt > timing.pcntMax) warnings.push(`${gpo.group} entry${entry.index}: PCNT=${formatCount4(entry.pcnt)} 超过 ${timing.soc === 'mt9603' ? 'MT9603 限制' : 'Htotal'}=${formatCount4(timing.pcntMax)}。`);
+      if (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && entry.lcnt !== 0) warnings.push(`${gpo.group} entry${entry.index}: Repeat_mode_SEL=0(by line)，LCNT=${formatCount4(entry.lcnt)} 不应作为调参目标。`);
       if (gpo.repeatMode === 1 && entry.enabled && entry.frameCount > gpo.repeatCount) warnings.push(`${gpo.group} entry${entry.index}: Frame_cnt=${entry.frameCount} 超过 Repeat_Count_num=${gpo.repeatCount}。`);
     }
   }

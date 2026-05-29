@@ -143,7 +143,7 @@ h1 { margin: 0; font-family: var(--serif); font-size: clamp(24px, 3vw, 38px); li
 .workspace {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(720px, 1fr) clamp(360px, 23vw, 520px);
+  grid-template-columns: minmax(720px, 1fr) clamp(430px, 26vw, 560px);
   gap: 8px;
   transition: grid-template-columns 160ms ease;
 }
@@ -253,10 +253,14 @@ h1 { margin: 0; font-family: var(--serif); font-size: clamp(24px, 3vw, 38px); li
 .inspectorTitle div { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
 .inspectorTitle strong { color: var(--ink); font-size: 14px; white-space: nowrap; }
 .inspectorTitle span { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inspectorTitle button { padding: 5px 10px; }
+.inspectorTitle button {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
 .tabs {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   padding: 10px;
   border-bottom: 1px solid var(--line);
@@ -266,7 +270,7 @@ h1 { margin: 0; font-family: var(--serif); font-size: clamp(24px, 3vw, 38px); li
 }
 .tabs button {
   min-width: 0;
-  min-height: 52px;
+  min-height: 50px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: linear-gradient(150deg, #0b1727, #07111d);
@@ -275,6 +279,8 @@ h1 { margin: 0; font-family: var(--serif); font-size: clamp(24px, 3vw, 38px); li
   text-align: left;
   line-height: 1.2;
   font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.015);
 }
 .tabs button span {

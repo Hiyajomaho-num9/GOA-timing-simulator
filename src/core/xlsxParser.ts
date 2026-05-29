@@ -8,7 +8,7 @@ const VALUE_COL_GPIO = 10;
 const VALUE_COL_PANEL = 3;
 export type SocProfileSelection = SocProfile | 'auto';
 
-export async function parseXlsxFile(file: File, frameRate = 60, socProfile: SocProfileSelection = 'auto'): Promise<ParsedWorkbook> {
+async function parseXlsxFile(file: File, frameRate = 60, socProfile: SocProfileSelection = 'auto'): Promise<ParsedWorkbook> {
   const buffer = await file.arrayBuffer();
   return parseXlsxBuffer(buffer, file.name, frameRate, socProfile);
 }
@@ -22,7 +22,7 @@ export function parseXlsxBuffer(buffer: ArrayBuffer, fileName: string, frameRate
   return { workbook, fileName, soc, timing, gpioRows, gpos };
 }
 
-export function parseTiming(workbook: XLSX.WorkBook, frameRate = 60, soc: SocProfile = 'mt9216') {
+function parseTiming(workbook: XLSX.WorkBook, frameRate = 60, soc: SocProfile = 'mt9216') {
   const panelRows = parseRows(workbook, PANEL_SHEET, VALUE_COL_PANEL);
   const htotalRegister = findNumeric(panelRows, 'PanelHTotal') ?? 2199;
   const vtotal = findNumeric(panelRows, 'PanelVTotal') ?? 1126;
@@ -33,7 +33,7 @@ export function parseTiming(workbook: XLSX.WorkBook, frameRate = 60, soc: SocPro
   return makeTimingBase(htotalArg, vtotal, frameRate, { soc, panelMinHtotal, panelMinVtotal, panelDclk });
 }
 
-export function parseRows(workbook: XLSX.WorkBook, sheetName: string, valueCol: number): SheetRow[] {
+function parseRows(workbook: XLSX.WorkBook, sheetName: string, valueCol: number): SheetRow[] {
   const sheet = workbook.Sheets[sheetName];
   if (!sheet || !sheet['!ref']) return [];
   const range = XLSX.utils.decode_range(sheet['!ref']);
@@ -60,7 +60,7 @@ function findNumeric(rows: SheetRow[], name: string): number | undefined {
   return row ? parseNumber(row.value) : undefined;
 }
 
-export function buildGpos(rows: SheetRow[], soc: SocProfile = 'mt9216'): GpoConfig[] {
+function buildGpos(rows: SheetRow[], soc: SocProfile = 'mt9216'): GpoConfig[] {
   const groups = new Map<number, SheetRow[]>();
   for (const row of rows) {
     const idx = parseGpoIndex(row.group);
@@ -83,38 +83,7 @@ function buildGpo(index: number, rows: SheetRow[], soc: SocProfile): GpoConfig {
   for (const row of rows) cells[row.name] = row.valueCell;
 
   const entryEncoding: EntryEncoding = soc === 'mt9603' ? 'split-fields' : 'packed-fcnt';
-  const entryMap = new Map<number, Partial<GpoEntry>>();
-  for (const row of rows) {
-    const entryMatch = row.name.match(/entry(\d+)/i);
-    if (!entryMatch) continue;
-    const entryIndex = Number(entryMatch[1]);
-    const partial = entryMap.get(entryIndex) ?? { index: entryIndex, fcnt: 0, lcnt: 0, pcnt: 0, enabled: false, level: 0, frameCount: 0, cells: {} };
-    const value = parseNumber(row.value) ?? 0;
-
-    const cmdMatch = row.name.match(/entry\d+_cmd([012])_/i);
-    if (/entry\d+_enable/i.test(row.name)) {
-      partial.enabled = value === 1 || Boolean(value & 0x8000);
-      partial.cells = { ...(partial.cells ?? {}), enable: row.valueCell };
-    } else if (/entry\d+_Trigger_Value/i.test(row.name)) {
-      partial.level = asLevel(value);
-      partial.cells = { ...(partial.cells ?? {}), level: row.valueCell };
-    } else if (cmdMatch && Number(cmdMatch[1]) === 0) {
-      partial.fcnt = value;
-      partial.frameCount = entryEncoding === 'split-fields' ? value : value & 0xff;
-      partial.cells = { ...(partial.cells ?? {}), fcnt: row.valueCell };
-    } else if (cmdMatch && Number(cmdMatch[1]) === 1) {
-      partial.lcnt = value;
-      partial.cells = { ...(partial.cells ?? {}), lcnt: row.valueCell };
-    } else if (cmdMatch && Number(cmdMatch[1]) === 2) {
-      partial.pcnt = value;
-      partial.cells = { ...(partial.cells ?? {}), pcnt: row.valueCell };
-    }
-    entryMap.set(entryIndex, partial);
-  }
-
-  const entries = [...entryMap.values()]
-    .map((entry) => normalizeEntry(entry as GpoEntry, entryEncoding))
-    .sort((a, b) => a.index - b.index);
+  const entries = parseGpoEntries(rows, entryEncoding);
 
   return {
     index,
@@ -142,6 +111,59 @@ function buildGpo(index: number, rows: SheetRow[], soc: SocProfile): GpoConfig {
   };
 }
 
+function parseGpoEntries(rows: SheetRow[], entryEncoding: EntryEncoding): GpoEntry[] {
+  const entryMap = new Map<number, Partial<GpoEntry>>();
+  for (const row of rows) {
+    const entryIndex = parseEntryIndex(row.name);
+    if (entryIndex === undefined) continue;
+    const partial = entryMap.get(entryIndex) ?? emptyEntry(entryIndex);
+    applyEntryRow(partial, row, parseNumber(row.value) ?? 0, entryEncoding);
+    entryMap.set(entryIndex, partial);
+  }
+  return [...entryMap.values()]
+    .map((entry) => normalizeEntry(entry as GpoEntry, entryEncoding))
+    .sort((a, b) => a.index - b.index);
+}
+
+function parseEntryIndex(name: string): number | undefined {
+  const match = name.match(/entry(\d+)/i);
+  return match ? Number(match[1]) : undefined;
+}
+
+function emptyEntry(index: number): Partial<GpoEntry> {
+  return { index, fcnt: 0, lcnt: 0, pcnt: 0, enabled: false, level: 0, frameCount: 0, cells: {} };
+}
+
+function applyEntryRow(entry: Partial<GpoEntry>, row: SheetRow, value: number, encoding: EntryEncoding): void {
+  const cmd = row.name.match(/entry\d+_cmd([012])_/i)?.[1];
+  if (/entry\d+_enable/i.test(row.name)) setEntryEnable(entry, row, value);
+  else if (/entry\d+_Trigger_Value/i.test(row.name)) setEntryLevel(entry, row, value);
+  else if (cmd === '0') setEntryFcnt(entry, row, value, encoding);
+  else if (cmd === '1') setEntryCount(entry, row, 'lcnt', value);
+  else if (cmd === '2') setEntryCount(entry, row, 'pcnt', value);
+}
+
+function setEntryEnable(entry: Partial<GpoEntry>, row: SheetRow, value: number): void {
+  entry.enabled = value === 1 || Boolean(value & 0x8000);
+  entry.cells = { ...(entry.cells ?? {}), enable: row.valueCell };
+}
+
+function setEntryLevel(entry: Partial<GpoEntry>, row: SheetRow, value: number): void {
+  entry.level = asLevel(value);
+  entry.cells = { ...(entry.cells ?? {}), level: row.valueCell };
+}
+
+function setEntryFcnt(entry: Partial<GpoEntry>, row: SheetRow, value: number, encoding: EntryEncoding): void {
+  entry.fcnt = value;
+  entry.frameCount = encoding === 'split-fields' ? value : value & 0xff;
+  entry.cells = { ...(entry.cells ?? {}), fcnt: row.valueCell };
+}
+
+function setEntryCount(entry: Partial<GpoEntry>, row: SheetRow, key: 'lcnt' | 'pcnt', value: number): void {
+  entry[key] = value;
+  entry.cells = { ...(entry.cells ?? {}), [key]: row.valueCell };
+}
+
 function normalizeEntry(entry: GpoEntry, encoding: EntryEncoding): GpoEntry {
   const fcnt = entry.fcnt ?? 0;
   const split = encoding === 'split-fields';
@@ -157,13 +179,13 @@ function normalizeEntry(entry: GpoEntry, encoding: EntryEncoding): GpoEntry {
   };
 }
 
-export function parseGpoIndex(group: string): number | undefined {
+function parseGpoIndex(group: string): number | undefined {
   const match = String(group ?? '').match(/^GPO(\d+|[A-F])/i);
   if (!match) return undefined;
   return /[A-F]/i.test(match[1]) ? Number.parseInt(match[1], 16) : Number.parseInt(match[1], 10);
 }
 
-export function parseNumber(value: unknown): number | undefined {
+function parseNumber(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value !== 'string') return undefined;
   const text = value.trim();

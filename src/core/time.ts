@@ -47,7 +47,7 @@ export function absPcnt(lcnt: number, pcnt: number, htotal: number): number {
   return lcnt * htotal + pcnt;
 }
 
-export function splitAbs(abs: number, htotal: number): { lcnt: number; pcnt: number } {
+function splitAbs(abs: number, htotal: number): { lcnt: number; pcnt: number } {
   return { lcnt: Math.floor(abs / htotal), pcnt: abs % htotal };
 }
 
@@ -61,5 +61,10 @@ export function formatDuration(seconds: number | undefined): string {
 
 export function formatPcnt(abs: number, htotal: number): string {
   const p = splitAbs(abs, htotal);
-  return `L${p.lcnt}.P${p.pcnt}`;
+  return `L${formatCount4(p.lcnt)}.P${formatCount4(p.pcnt)}`;
+}
+
+export function formatCount4(value: number): string {
+  const sign = value < 0 ? '-' : '';
+  return `${sign}${Math.abs(Math.trunc(value)).toString().padStart(4, '0')}`;
 }
