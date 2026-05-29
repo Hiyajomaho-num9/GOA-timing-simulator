@@ -30,6 +30,8 @@ engine-rs/target/
 *.bmp
 *.gif
 *.zip
+!docs/assets/
+!docs/assets/*.jpg
 archives/
 brainstorming.md
 

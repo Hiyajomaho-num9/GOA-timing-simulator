@@ -2,11 +2,13 @@
 
 本项目是 GOA timing 波形调试器，用于按 XLSX 原生寄存器结构调试 MT9216 / MT9603 / MT9633 的 GPIO timing、Level Shifter 输出和 timing measurement。
 
+![GOA Timing Simulator waveform preview](docs/assets/goa-timing-simulator-preview.jpg)
+
 ## 当前范围
 
 - 直接导入 `.xlsx`，老 `.xls` 先由用户自行转换成 `.xlsx`。
 - 第一阶段重点解析 GPIO timing 相关内容。
-- Level Shifter 已支持单 EK86707A、双 EK86707A、单 iML7272B/iML7272BK 预览。
+- Level Shifter 已支持单 EK86707A、双 EK86707A、单 iML7272B/iML7272BK、单 EK86752B 预览。
 - MT9603 / MT9633 的 Driver_TP 按 data_cmd 特例生成，不强行从 GPO 映射。
 - Timing engine 只使用 XLSX 里的实际寄存器值，不拿 PDF/panel spec 的 `V-total` 参与计算。
 
