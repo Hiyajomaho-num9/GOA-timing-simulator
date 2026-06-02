@@ -643,10 +643,10 @@ function mt9603DriverTpPanel(): string {
   return `
     <section class="panelSection">
       <h3>MT9603 Driver_TP / data_cmd</h3>
-      <div class="callout ok">Driver_TP 不从 GPO 生成，也不做 mask；固定从 L0.P2 起跳。宽度/周期支持 300ns、3us，纯数字默认按 us 处理；周期留空则按 1line=${oneLineUs.toFixed(3)}us。</div>
+      <div class="callout ok">Driver_TP 不从 GPO 生成，也不做 mask；固定从 L0.P2 起跳。宽度/周期支持 300ns、1.1us、3us；裸数字会自动保存成 us，周期留空则按 1line=${oneLineUs.toFixed(3)}us。</div>
       <div class="formGrid">
-        <label>正脉冲宽度 <input data-tp-generator="driverTpWidth" value="${htmlAttr(tp.driverTpWidth)}" placeholder="3 或 300ns" /></label>
-        <label>周期 <input data-tp-generator="driverTpPeriod" value="${htmlAttr(tp.driverTpPeriod)}" placeholder="空=1line，或 14.8us" /></label>
+        <label>正脉冲宽度 <input data-tp-generator="driverTpWidth" value="${htmlAttr(normalizeTpDurationInput(tp.driverTpWidth, false))}" placeholder="默认 3us；300ns 需写 ns" /></label>
+        <label>周期 <input data-tp-generator="driverTpPeriod" value="${htmlAttr(normalizeTpDurationInput(tp.driverTpPeriod, true))}" placeholder="空=1line；裸数字按 us" /></label>
         <label>起点 <input value="L0.P2" disabled /></label>
       </div>
     </section>`;
@@ -1260,7 +1260,9 @@ function bindPanelEvents(root: HTMLElement): void {
     input.addEventListener('change', () => {
       const key = input.dataset.tpGenerator as keyof TpGeneratorConfig;
       const current = state.project.tpGenerator ?? defaultTpGeneratorConfig();
-      state.project.tpGenerator = { ...current, [key]: input.value };
+      const normalized = normalizeTpDurationInput(input.value, key === 'driverTpPeriod');
+      input.value = normalized;
+      state.project.tpGenerator = { ...current, [key]: normalized };
       markDirty(root);
     });
   });
@@ -2254,6 +2256,15 @@ function formatTargetInput(seconds: number | undefined): string {
   return `${(seconds * 1e6).toFixed(3)}us`;
 }
 
+function normalizeTpDurationInput(value: string, allowBlank: boolean): string {
+  const text = value.trim();
+  if (!text) return allowBlank ? '' : defaultTpGeneratorConfig().driverTpWidth;
+  const match = text.match(/^([+-]?\d+(?:\.\d+)?)\s*(ns|us|µs|μs|ms|s)?$/i);
+  if (!match) return text;
+  const unit = match[2]?.toLowerCase().replace('μ', 'µ') ?? 'us';
+  return `${match[1]}${unit}`;
+}
+
 function formatTargetDelta(m: NonNullable<DraftProject['simulation']>['measurements'][number]): string {
   if (m.targetSeconds === undefined) return '未设置 target';
   if (m.errorSeconds === undefined || m.errorPcnt === undefined) return '-';
@@ -2520,8 +2531,8 @@ function parseTpGeneratorConfig(value: unknown): TpGeneratorConfig {
   if (!value || typeof value !== 'object') return defaults;
   const source = value as Record<string, unknown>;
   return {
-    driverTpWidth: typeof source.driverTpWidth === 'string' ? source.driverTpWidth : defaults.driverTpWidth,
-    driverTpPeriod: typeof source.driverTpPeriod === 'string' ? source.driverTpPeriod : defaults.driverTpPeriod,
+    driverTpWidth: typeof source.driverTpWidth === 'string' ? normalizeTpDurationInput(source.driverTpWidth, false) : defaults.driverTpWidth,
+    driverTpPeriod: typeof source.driverTpPeriod === 'string' ? normalizeTpDurationInput(source.driverTpPeriod, true) : defaults.driverTpPeriod,
   };
 }
 

@@ -287,7 +287,7 @@ export type DraftProject = {
 };
 
 export const defaultTpGeneratorConfig = (): TpGeneratorConfig => ({
-  driverTpWidth: '3',
+  driverTpWidth: '3us',
   driverTpPeriod: '',
 });
 
