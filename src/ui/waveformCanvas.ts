@@ -58,11 +58,11 @@ export function drawWaveform(
   const width = rect.width;
   const height = rect.height;
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = '#07111f';
+  ctx.fillStyle = '#080c10';
   ctx.fillRect(0, 0, width, height);
 
   if (!timing || !view || signals.length === 0) {
-    drawEmpty(ctx, width, height, '导入 XLSX 并点击重新计算波形');
+    drawEmpty(ctx, width, height, '导入 XLSX 后直接调参，波形会实时刷新');
     return undefined;
   }
 
@@ -186,8 +186,8 @@ function drawSignalEdges(
 
 function appendSelectedMarkers(edge: Edge, x: number, highY: number, lowY: number, options: WaveformDrawOptions, markers: WaveformMarker[]): void {
   if (edge.id === options.hoverEdgeId) markers.push({ edge, x, y1: highY - 8, y2: lowY + 8, color: '#9ab6c6', label: 'SNAP' });
-  if (edge.id === options.selectedStartEdgeId) markers.push({ edge, x, y1: highY - 8, y2: lowY + 8, color: '#9db68b', label: 'START' });
-  if (edge.id === options.selectedEndEdgeId) markers.push({ edge, x, y1: highY - 8, y2: lowY + 8, color: '#b89b78', label: 'END' });
+  if (edge.id === options.selectedStartEdgeId) markers.push({ edge, x, y1: highY - 8, y2: lowY + 8, color: '#c8a94f', label: 'T-A' });
+  if (edge.id === options.selectedEndEdgeId) markers.push({ edge, x, y1: highY - 8, y2: lowY + 8, color: '#8fb7c6', label: 'T-B' });
 }
 
 function drawHeader(ctx: CanvasRenderingContext2D, layout: WaveformLayout, view: WaveformView, timing: TimingBase): void {
@@ -204,17 +204,17 @@ function countPositivePulses(signal: SignalTrace): number {
 function drawFreeCursor(ctx: CanvasRenderingContext2D, x: number, top: number, plotHeight: number, left: number, plotW: number, label?: string): void {
   if (x < left || x > left + plotW) return;
   ctx.save();
-  ctx.strokeStyle = '#b4a078';
-  ctx.fillStyle = '#b4a078';
-  ctx.lineWidth = 1.2;
-  ctx.setLineDash([6, 5]);
+  ctx.strokeStyle = '#c8a94f';
+  ctx.fillStyle = '#c8a94f';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 6]);
   ctx.beginPath();
   ctx.moveTo(x, top - 14);
   ctx.lineTo(x, top + plotHeight + 4);
   ctx.stroke();
   ctx.setLineDash([]);
-  ctx.globalAlpha = 0.12;
-  ctx.fillRect(Math.max(left, x - 4), top - 10, Math.min(8, left + plotW - x + 4), plotHeight + 14);
+  ctx.globalAlpha = 0.08;
+  ctx.fillRect(Math.max(left, x - 3), top - 10, Math.min(6, left + plotW - x + 3), plotHeight + 14);
   ctx.globalAlpha = 1;
   ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
   ctx.fillText(label ? `POINT ${label}` : 'POINT', Math.min(x + 6, left + plotW - 120), top - 20);
@@ -242,7 +242,7 @@ function drawDragPreview(ctx: CanvasRenderingContext2D, x: number, top: number, 
 }
 
 function drawGrid(ctx: CanvasRenderingContext2D, left: number, top: number, width: number, height: number, view: WaveformView, timing: TimingBase): void {
-  ctx.strokeStyle = '#17243a';
+  ctx.strokeStyle = '#1a2430';
   ctx.lineWidth = 1;
   const span = view.end - view.start;
   const lineStep = timing.pcntPerLine;
@@ -272,15 +272,15 @@ function drawMarkers(
     ctx.save();
     ctx.strokeStyle = marker.color;
     ctx.fillStyle = marker.color;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = marker.label === 'SNAP' ? 1 : 1.2;
+    ctx.setLineDash(marker.label === 'SNAP' ? [1, 8] : [3, 7]);
     ctx.beginPath();
     ctx.moveTo(marker.x, top - 14);
     ctx.lineTo(marker.x, top + plotHeight + 4);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.globalAlpha = 0.16;
-    ctx.fillRect(Math.max(left, marker.x - 7), marker.y1, Math.min(14, left + plotW - marker.x + 7), marker.y2 - marker.y1);
+    ctx.globalAlpha = marker.label === 'SNAP' ? 0.07 : 0.11;
+    ctx.fillRect(Math.max(left, marker.x - 4), marker.y1, Math.min(8, left + plotW - marker.x + 4), marker.y2 - marker.y1);
     ctx.globalAlpha = 1;
     ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
     ctx.fillText(marker.label, Math.min(marker.x + 5, left + plotW - 46), Math.max(14, marker.y1 - 4));

@@ -1,5 +1,5 @@
 import { defaultTpGeneratorConfig, ek86707aSet1OutputCount } from './types';
-import type { CombinType, DraftProject, Edge, DualEk86707aConfig, Ek86707aConfig, Ek86707aCommonConfig, Ek86752bConfig, GpoConfig, Iml7272bConfig, LogicLevel, MeasurementResult, Segment, SignalFamily, SignalTrace, SimulationResult, TerCpv2Inference, TimingBase, TpGeneratorConfig } from './types';
+import type { CombinType, DraftProject, Edge, DualEk86707aConfig, Ek86707aConfig, Ek86707aCommonConfig, Ek86752bConfig, GpoConfig, Iml7272bConfig, LogicLevel, Measurement, MeasurementResult, Segment, SignalFamily, SignalTrace, SimulationResult, TerCpv2Inference, TimingBase, TpGeneratorConfig } from './types';
 import { absPcnt, formatCount4 } from './time';
 
 const COLORS = [
@@ -1208,9 +1208,9 @@ function invertSegments(segments: Segment[]): Segment[] {
   return segments.map((segment) => ({ ...segment, level: invert(segment.level), source: `${segment.source ?? 'signal'}:invert` }));
 }
 
-function resolveMeasurement(measurement: { id: string; startEdgeId: string; endEdgeId: string; targetSeconds?: number; notes?: string }, edges: Edge[], timing: TimingBase): MeasurementResult {
-  const startEdge = edges.find((e) => e.id === measurement.startEdgeId);
-  const endEdge = edges.find((e) => e.id === measurement.endEdgeId);
+function resolveMeasurement(measurement: Measurement, edges: Edge[], timing: TimingBase): MeasurementResult {
+  const startEdge = resolveMeasurementEdge(measurement.startEdgeId, measurement.startPoint, edges);
+  const endEdge = resolveMeasurementEdge(measurement.endEdgeId, measurement.endPoint, edges);
   if (!startEdge || !endEdge) return { ...measurement, startEdge, endEdge };
   const deltaPcnt = endEdge.at - startEdge.at;
   const seconds = deltaPcnt * timing.pcntSeconds;
@@ -1228,6 +1228,19 @@ function resolveMeasurement(measurement: { id: string; startEdgeId: string; endE
     errorLcnt: Math.trunc(errorPcnt / timing.pcntPerLine),
     errorRemainderPcnt: errorPcnt % timing.pcntPerLine,
   };
+}
+
+function resolveMeasurementEdge(edgeId: string, snapshot: Edge | undefined, edges: Edge[]): Edge | undefined {
+  const exact = edges.find((edge) => edge.id === edgeId);
+  if (exact) return exact;
+  if (!snapshot) return undefined;
+  const candidates = edges.filter((edge) => (
+    edge.signalId === snapshot.signalId
+    && edge.edge === snapshot.edge
+    && edge.level === snapshot.level
+  ));
+  if (candidates.length === 0) return snapshot;
+  return candidates.reduce((best, edge) => (Math.abs(edge.at - snapshot.at) < Math.abs(best.at - snapshot.at) ? edge : best), candidates[0]);
 }
 
 function validateGpos(gpos: GpoConfig[], timing: TimingBase): string[] {

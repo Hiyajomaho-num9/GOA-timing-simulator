@@ -82,6 +82,8 @@ const state: {
   manualEkInputKeys: Set<EkInputKey>;
   manualImlInputKeys: Set<ImlInputKey>;
   manualEk52InputKeys: Set<Ek52InputKey>;
+  compareEnabled: boolean;
+  memoryGpos?: GpoConfig[];
 } = {
   project: { gpos: [], levelShifter: defaultLevelShifterConfig(), tpGenerator: defaultTpGeneratorConfig(), measurements: [], patches: [], dirty: false },
   socProfileChoice: 'auto',
@@ -96,6 +98,7 @@ const state: {
   manualEkInputKeys: new Set<EkInputKey>(),
   manualImlInputKeys: new Set<ImlInputKey>(),
   manualEk52InputKeys: new Set<Ek52InputKey>(),
+  compareEnabled: false,
 };
 
 export function mountApp(root: HTMLElement): void {
@@ -118,15 +121,13 @@ function layout(): string {
         <label class="file-picker">导入 XLSX<input id="fileInput" type="file" accept=".xlsx,.xlsm,.xls" /></label>
         <label>SoC Profile <select id="socProfile"><option value="auto">Auto</option><option value="mt9216">MT9216</option><option value="mt9603">MT9603 / MT9633</option></select></label>
         <label>Frame Rate <input id="frameRate" type="number" min="1" step="0.01" value="60" /></label>
-        <button id="recalcBtn">重新计算波形</button>
+        <label>GPO Quick <input id="quickGpoInput" list="gpoQuickList" placeholder="GPO6 / CPV1 / RST" /><datalist id="gpoQuickList"></datalist></label>
+        <label class="check compactCheck"><input id="compareToggle" type="checkbox" /> Compare memory</label>
+        <button id="storeMemoryBtn">Store memory</button>
         <button id="exportXlsxBtn">导出 patched XLSX</button>
-        <button id="exportPatchBtn">导出 JSON patch</button>
-        <button id="exportLsConfigBtn">导出 LS JSON</button>
-        <label class="file-picker compact">导入 LS JSON<input id="lsConfigInput" type="file" accept=".json" /></label>
-        <button id="exportMeasBtn">导出 measurement CSV</button>
-        <button id="exportPngBtn">导出 PNG</button>
-        <button id="exportReportBtn">导出 HTML report</button>
-        <span id="dirtyBadge" class="badge">clean</span>
+        <label class="file-picker compact">导入 LS BIN<input id="lsBinInput" type="file" accept=".bin,.json" /></label>
+        <button id="exportLsBinBtn">导出 LS BIN</button>
+        <span id="memoryBadge" class="badge">memory off</span>
       </section>
       <main class="workspace">
         <section class="timelinePane">
@@ -217,14 +218,20 @@ function bindStaticEvents(root: HTMLElement): void {
       render(root);
     }
   });
-  root.querySelector<HTMLButtonElement>('#recalcBtn')?.addEventListener('click', () => recalc(root));
-  root.querySelector<HTMLButtonElement>('#exportXlsxBtn')?.addEventListener('click', exportPatchedXlsx);
-  root.querySelector<HTMLButtonElement>('#exportPatchBtn')?.addEventListener('click', exportPatchJson);
-  root.querySelector<HTMLButtonElement>('#exportLsConfigBtn')?.addEventListener('click', exportLevelShifterJson);
-  root.querySelector<HTMLInputElement>('#lsConfigInput')?.addEventListener('change', async (event) => importLevelShifterJson(root, event.currentTarget as HTMLInputElement));
-  root.querySelector<HTMLButtonElement>('#exportMeasBtn')?.addEventListener('click', exportMeasurementCsv);
-  root.querySelector<HTMLButtonElement>('#exportPngBtn')?.addEventListener('click', () => exportWaveformPng(root));
-  root.querySelector<HTMLButtonElement>('#exportReportBtn')?.addEventListener('click', () => exportHtmlReport(root));
+  root.querySelector<HTMLButtonElement>('#exportXlsxBtn')?.addEventListener('click', () => exportPatchedXlsx(root));
+  root.querySelector<HTMLButtonElement>('#exportLsBinBtn')?.addEventListener('click', exportLevelShifterBin);
+  root.querySelector<HTMLInputElement>('#lsBinInput')?.addEventListener('change', async (event) => importLevelShifterBin(root, event.currentTarget as HTMLInputElement));
+  root.querySelector<HTMLInputElement>('#quickGpoInput')?.addEventListener('input', (event) => quickSelectGpo(root, (event.currentTarget as HTMLInputElement).value));
+  root.querySelector<HTMLInputElement>('#compareToggle')?.addEventListener('change', (event) => {
+    state.compareEnabled = (event.currentTarget as HTMLInputElement).checked;
+    render(root);
+  });
+  root.querySelector<HTMLButtonElement>('#storeMemoryBtn')?.addEventListener('click', () => {
+    state.memoryGpos = structuredCloneGpos(state.project.gpos);
+    state.compareEnabled = true;
+    state.message = `已存入 compare memory：${state.memoryGpos.length} 个 GPO`;
+    render(root);
+  });
   root.querySelector<HTMLButtonElement>('#dockToggleBtn')?.addEventListener('click', () => {
     state.dockCollapsed = !state.dockCollapsed;
     render(root);
@@ -360,9 +367,16 @@ function render(root: HTMLElement): void {
   root.querySelector('.workspace')?.classList.toggle('dockCollapsed', state.dockCollapsed);
   const dockToggle = root.querySelector<HTMLButtonElement>('#dockToggleBtn');
   if (dockToggle) dockToggle.textContent = state.dockCollapsed ? '展开' : '收起';
-  root.querySelector('#dirtyBadge')!.textContent = state.project.dirty ? 'dirty draft' : 'clean';
-  root.querySelector('#dirtyBadge')!.className = `badge ${state.project.dirty ? 'dirty' : ''}`;
+  const compareToggle = root.querySelector<HTMLInputElement>('#compareToggle');
+  if (compareToggle) compareToggle.checked = state.compareEnabled;
+  const memoryBadge = root.querySelector('#memoryBadge');
+  if (memoryBadge) {
+    const diffCount = countMemoryDiffs();
+    memoryBadge.textContent = state.memoryGpos ? `memory ${state.compareEnabled ? `${diffCount} diff` : 'stored'}` : 'memory empty';
+    memoryBadge.className = `badge ${state.compareEnabled && diffCount > 0 ? 'dirty' : ''}`;
+  }
   root.querySelector('#statusLine')!.textContent = state.message;
+  renderGpoQuickList(root);
   renderReferenceControls(root);
   renderViewButtons(root);
   renderSnapControls(root);
@@ -391,6 +405,8 @@ function loadWorkbook(root: HTMLElement, buffer: ArrayBuffer, fileName: string, 
   state.manualEkInputKeys.clear();
   state.manualImlInputKeys.clear();
   state.manualEk52InputKeys.clear();
+  state.compareEnabled = false;
+  state.memoryGpos = undefined;
   state.extraSignalIds = [];
   state.referenceSignalId = undefined;
   state.referenceEdgeId = undefined;
@@ -411,6 +427,28 @@ function renderSocProfileControl(root: HTMLElement): void {
   const select = root.querySelector<HTMLSelectElement>('#socProfile');
   if (!select) return;
   select.value = state.socProfileChoice;
+}
+
+function renderGpoQuickList(root: HTMLElement): void {
+  const list = root.querySelector<HTMLDataListElement>('#gpoQuickList');
+  if (!list) return;
+  list.innerHTML = state.project.gpos
+    .map((gpo) => `<option value="${htmlAttr(gpo.group)}"></option><option value="GPO${gpo.index}"></option>`)
+    .join('');
+}
+
+function quickSelectGpo(root: HTMLElement, value: string): void {
+  const text = value.trim().toLowerCase();
+  if (!text) return;
+  const numeric = text.match(/^gpo\s*(\d+)$/i)?.[1] ?? text.match(/^(\d+)$/)?.[1];
+  const selected = numeric !== undefined
+    ? state.project.gpos.find((gpo) => gpo.index === Number(numeric))
+    : state.project.gpos.find((gpo) => gpo.group.toLowerCase().includes(text));
+  if (!selected || state.selectedGpo === selected.index) return;
+  state.selectedGpo = selected.index;
+  state.activeTab = 'gpio';
+  state.message = `已定位 ${selected.group}，直接改 entry 会实时刷新波形`;
+  render(root);
 }
 
 function renderTimebase(root: HTMLElement): void {
@@ -448,9 +486,21 @@ function renderReferenceControls(root: HTMLElement): void {
 
   const signal = signalById(state.referenceSignalId);
   if (signal && state.referenceEdgeId && !signal.edges.some((edge) => edge.id === state.referenceEdgeId)) state.referenceEdgeId = signal.edges[0]?.id;
+  const edgeOptions = referenceEdgeOptions(signal);
   edgeSelect.disabled = !signal || signal.edges.length === 0;
-  edgeSelect.innerHTML = `<option value="">选择参考边沿</option>${(signal?.edges ?? []).map((edge) => `<option value="${htmlAttr(edge.id)}">${htmlText(edgeLabel(edge))}</option>`).join('')}`;
+  edgeSelect.innerHTML = `<option value="">选择参考边沿</option>${edgeOptions.map((edge) => `<option value="${htmlAttr(edge.id)}">${htmlText(edgeLabel(edge))}</option>`).join('')}`;
   edgeSelect.value = state.referenceEdgeId ?? '';
+}
+
+function referenceEdgeOptions(signal: SignalTrace | undefined): Edge[] {
+  if (!signal) return [];
+  if (signal.edges.length <= 500) return signal.edges;
+  const view = state.view;
+  const selected = state.referenceEdgeId ? signal.edges.find((edge) => edge.id === state.referenceEdgeId) : undefined;
+  const inView = view ? signal.edges.filter((edge) => edge.at >= view.start && edge.at <= view.end).slice(0, 480) : [];
+  const result = selected && !inView.some((edge) => edge.id === selected.id) ? [selected, ...inView] : inView;
+  if (result.length > 0) return result;
+  return signal.edges.slice(0, 500);
 }
 
 function renderViewButtons(root: HTMLElement): void {
@@ -633,7 +683,7 @@ function levelPanel(): string {
         ${levelInputSelect('ek', 'pol', 'POL', ls.inputs.pol)}
       </div>
     </section>
-    <p class="hint">修改后先进入 dirty draft，点击“重新计算波形”后才应用到 CK preview。</p>`;
+    <p class="hint">修改寄存器后会实时重算波形；导出 patched XLSX 才会写回文件。</p>`;
 }
 
 function mt9603DriverTpPanel(): string {
@@ -1134,20 +1184,25 @@ function gpioPanel(): string {
 function combinPanel(): string {
   const selected = selectedGpo();
   if (!selected) return emptyPanel('导入 XLSX 后显示 Combin / Mask。');
+  const baseline = memoryGpo(selected.index);
   return `
     <h2>Combin / Mask 参数页</h2>
     ${gpoSelector(state.project.gpos)}
     <div class="formGrid">
-      <label>${selected.soc === 'mt9603' ? 'Logic_function' : 'Combin_Type_SEL'} <input data-gpo-field="combinType" type="number" min="0" max="7" value="${selected.combinType}" /></label>
-      <label>GPO_Combin_SEL <input data-gpo-field="combinSel" type="number" min="0" max="23" value="${selected.combinSel}" /></label>
-      <label>Repeat_mode_SEL <input data-gpo-field="repeatMode" type="number" min="0" max="1" value="${selected.repeatMode}" /></label>
-      <label class="check"><input data-gpo-field="maskEnabled" type="checkbox" ${selected.maskEnabled ? 'checked' : ''}/> Mask_region_EN</label>
-      <label>Region_VST ${countInput('data-gpo-field="regionVst"', selected.regionVst)}</label>
-      <label>Region_VEND ${countInput('data-gpo-field="regionVend"', selected.regionVend)}</label>
-      <label>Region_pst ${countInput('data-gpo-field="regionPst"', selected.regionPst)}</label>
-      <label>Region_pend ${countInput('data-gpo-field="regionPend"', selected.regionPend)}</label>
-      <label>Region_other_Value <input data-gpo-field="regionOtherValue" type="number" min="0" max="1" value="${selected.regionOtherValue}" /></label>
+      ${compareGpoField('combinType', baseline?.combinType, selected.combinType, selected.soc === 'mt9603' ? 'Logic_function' : 'Combin_Type_SEL', `<input data-gpo-field="combinType" type="number" min="0" max="7" value="${selected.combinType}" />`)}
+      ${compareGpoField('combinSel', baseline?.combinSel, selected.combinSel, 'GPO_Combin_SEL', `<input data-gpo-field="combinSel" type="number" min="0" max="23" value="${selected.combinSel}" />`)}
+      ${compareGpoField('repeatMode', baseline?.repeatMode, selected.repeatMode, 'Repeat_mode_SEL', `<input data-gpo-field="repeatMode" type="number" min="0" max="1" value="${selected.repeatMode}" />`)}
+      ${compareGpoField('maskEnabled', baseline?.maskEnabled, selected.maskEnabled, 'Mask_region_EN', `<label class="check embeddedCheck"><input data-gpo-field="maskEnabled" type="checkbox" ${selected.maskEnabled ? 'checked' : ''}/> enabled</label>`, formatBool)}
+      ${compareGpoField('regionVst', baseline?.regionVst, selected.regionVst, 'Region_VST', countInput('data-gpo-field="regionVst"', selected.regionVst), formatCount4)}
+      ${compareGpoField('regionVend', baseline?.regionVend, selected.regionVend, 'Region_VEND', countInput('data-gpo-field="regionVend"', selected.regionVend), formatCount4)}
+      ${compareGpoField('regionPst', baseline?.regionPst, selected.regionPst, 'Region_pst', countInput('data-gpo-field="regionPst"', selected.regionPst), formatCount4)}
+      ${compareGpoField('regionPend', baseline?.regionPend, selected.regionPend, 'Region_pend', countInput('data-gpo-field="regionPend"', selected.regionPend), formatCount4)}
+      ${compareGpoField('regionOtherValue', baseline?.regionOtherValue, selected.regionOtherValue, 'Region_other_Value', `<input data-gpo-field="regionOtherValue" type="number" min="0" max="1" value="${selected.regionOtherValue}" />`)}
     </div>`;
+}
+
+function compareGpoField<T>(field: string, oldValue: T | undefined, newValue: T, label: string, control: string, format: (value: T) => string = String): string {
+  return `<label class="${compareClass(oldValue, newValue)}" data-compare-field="${htmlAttr(field)}">${label}${control}${compareHint(oldValue, newValue, format)}</label>`;
 }
 
 function measurementPanel(): string {
@@ -1209,16 +1264,44 @@ function gpoSelector(gpos: GpoConfig[]): string {
 
 function entryTable(gpo: GpoConfig): string {
   return `<table><thead><tr><th>entry</th><th>FCNT</th><th>EN</th><th>level</th><th>LCNT</th><th>PCNT</th><th>cell</th></tr></thead><tbody>
-    ${gpo.entries.map((e) => `<tr>
+    ${gpo.entries.map((e) => {
+      const baseline = memoryEntry(gpo.index, e.index);
+      return `<tr>
       <td>${e.index}</td>
-      <td><input data-entry="${e.index}" data-entry-field="fcnt" value="0x${e.fcnt.toString(16).toUpperCase()}" /></td>
-      <td>${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="enabled" type="number" min="0" max="1" value="${e.enabled ? 1 : 0}" />` : e.enabled ? '1' : '0'}</td>
-      <td>${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="level" type="number" min="0" max="1" value="${e.level}" />` : e.level ? 'HIGH' : 'LOW'}</td>
-      <td>${countInput(`data-entry="${e.index}" data-entry-field="lcnt"`, e.lcnt, gpo.repeatMode === 0 && gpo.soc !== 'mt9603' ? 'disabled title="by-line 禁止修改 LCNT"' : '')}</td>
-      <td>${countInput(`data-entry="${e.index}" data-entry-field="pcnt"`, e.pcnt)}</td>
+      <td class="${compareClass(baseline?.fcnt, e.fcnt)}"><input data-entry="${e.index}" data-entry-field="fcnt" value="0x${e.fcnt.toString(16).toUpperCase()}" />${compareHint(baseline?.fcnt, e.fcnt, formatHex)}</td>
+      <td class="${compareClass(baseline?.enabled, e.enabled)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="enabled" type="number" min="0" max="1" value="${e.enabled ? 1 : 0}" />` : e.enabled ? '1' : '0'}${compareHint(baseline?.enabled, e.enabled, formatBool)}</td>
+      <td class="${compareClass(baseline?.level, e.level)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="level" type="number" min="0" max="1" value="${e.level}" />` : e.level ? 'HIGH' : 'LOW'}${compareHint(baseline?.level, e.level, String)}</td>
+      <td class="${compareClass(baseline?.lcnt, e.lcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="lcnt"`, e.lcnt, gpo.repeatMode === 0 && gpo.soc !== 'mt9603' ? 'disabled title="by-line 禁止修改 LCNT"' : '')}${compareHint(baseline?.lcnt, e.lcnt, formatCount4)}</td>
+      <td class="${compareClass(baseline?.pcnt, e.pcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="pcnt"`, e.pcnt)}${compareHint(baseline?.pcnt, e.pcnt, formatCount4)}</td>
       <td>${e.cells.enable?.address ?? '-'} / ${e.cells.level?.address ?? '-'} / ${e.cells.fcnt?.address ?? '-'} / ${e.cells.lcnt?.address ?? '-'} / ${e.cells.pcnt?.address ?? '-'}</td>
-    </tr>`).join('')}
+    </tr>`;
+    }).join('')}
   </tbody></table>`;
+}
+
+function memoryEntry(gpoIndex: number, entryIndex: number): GpoConfig['entries'][number] | undefined {
+  return memoryGpo(gpoIndex)?.entries.find((entry) => entry.index === entryIndex);
+}
+
+function memoryGpo(gpoIndex: number): GpoConfig | undefined {
+  return state.memoryGpos?.find((gpo) => gpo.index === gpoIndex);
+}
+
+function compareClass(oldValue: unknown, newValue: unknown): string {
+  return state.compareEnabled && oldValue !== undefined && oldValue !== newValue ? 'compareChanged' : '';
+}
+
+function compareHint<T>(oldValue: T | undefined, newValue: T, format: (value: T) => string): string {
+  if (!state.compareEnabled || oldValue === undefined || oldValue === newValue) return '';
+  return `<small class="memoryOld">old ${htmlText(format(oldValue))}</small>`;
+}
+
+function formatHex(value: number): string {
+  return `0x${value.toString(16).toUpperCase()}`;
+}
+
+function formatBool(value: boolean): string {
+  return value ? '1' : '0';
 }
 
 function emptyPanel(message: string): string {
@@ -1290,7 +1373,6 @@ function bindPanelEvents(root: HTMLElement): void {
     state.project.levelShifter.inputs = {};
     state.manualEkInputKeys.clear();
     markDirty(root);
-    recalc(root);
   });
   root.querySelector<HTMLButtonElement>('#autoDetectImlInputsBtn')?.addEventListener('click', () => {
     if (state.project.levelShifter.model !== 'single-iml7272b') return;
@@ -1301,7 +1383,6 @@ function bindPanelEvents(root: HTMLElement): void {
     state.project.levelShifter.inputs = {};
     state.manualImlInputKeys.clear();
     markDirty(root);
-    recalc(root);
   });
   root.querySelector<HTMLButtonElement>('#autoDetectEk52InputsBtn')?.addEventListener('click', () => {
     if (state.project.levelShifter.model !== 'single-ek86752b') return;
@@ -1312,7 +1393,6 @@ function bindPanelEvents(root: HTMLElement): void {
     state.project.levelShifter.inputs = {};
     state.manualEk52InputKeys.clear();
     markDirty(root);
-    recalc(root);
   });
   root.querySelector<HTMLSelectElement>('#gpoSelect')?.addEventListener('change', (event) => {
     state.selectedGpo = Number((event.currentTarget as HTMLSelectElement).value);
@@ -1326,15 +1406,39 @@ function bindPanelEvents(root: HTMLElement): void {
   root.querySelectorAll<HTMLButtonElement>('[data-delete-measure]').forEach((button) => button.addEventListener('click', () => {
     const index = Number(button.dataset.deleteMeasure);
     state.project.measurements.splice(index, 1);
-    recalc(root);
+    recalc(root, { preserveView: true, clearTransientCursors: true });
   }));
   root.querySelector<HTMLButtonElement>('#addMeasurementBtn')?.addEventListener('click', () => {
     if (!state.selectedStartEdge || !state.selectedEndEdge) return;
+    const startPoint = edgeById(state.selectedStartEdge);
+    const endPoint = edgeById(state.selectedEndEdge);
     const id = `T${state.project.measurements.length + 1}`;
-    state.project.measurements.push({ id, startEdgeId: state.selectedStartEdge, endEdgeId: state.selectedEndEdge });
-    markDirty(root);
-    recalc(root);
+    state.project.measurements.push({
+      id,
+      startEdgeId: state.selectedStartEdge,
+      endEdgeId: state.selectedEndEdge,
+      startPoint: cloneMeasurementEdge(startPoint),
+      endPoint: cloneMeasurementEdge(endPoint),
+    });
+    recalc(root, { preserveView: true, clearTransientCursors: true });
   });
+}
+
+function edgeById(id: string | undefined): Edge | undefined {
+  if (!id) return undefined;
+  return allSelectableEdges().find((edge) => edge.id === id);
+}
+
+function cloneMeasurementEdge(edge: Edge | undefined): Edge | undefined {
+  return edge ? { ...edge } : undefined;
+}
+
+function clearTransientMeasurementCursors(): void {
+  state.selectedStartEdge = undefined;
+  state.selectedEndEdge = undefined;
+  state.hoverEdge = undefined;
+  state.cursorPoint = undefined;
+  state.project.manualEdges = [];
 }
 
 function clearManualLevelInputLocks(): void {
@@ -1573,8 +1677,11 @@ function applyEdgeDragPatch(root: HTMLElement, drag: Extract<DragState, { mode: 
   state.selectedGpo = gpo.index;
   state.activeTab = 'gpio';
   state.project.dirty = true;
-  state.message = `已生成 patch suggestion：${edgePatchPath(drag.target)}；${formatPcnt(drag.originAt, t.pcntPerLine)} → ${formatPcnt(drag.previewAt, t.pcntPerLine)}。点击“重新计算波形”后预览结果。`;
-  render(root);
+  recalc(root, {
+    preserveView: true,
+    clearTransientCursors: true,
+    successMessage: `已生成 patch suggestion：${edgePatchPath(drag.target)}；${formatPcnt(drag.originAt, t.pcntPerLine)} → ${formatPcnt(drag.previewAt, t.pcntPerLine)}。`,
+  });
 }
 
 function edgeDragNextPosition(drag: Extract<DragState, { mode: 'edge' }>): { nextLcnt: number; nextPcnt: number } {
@@ -1638,27 +1745,28 @@ function addPatch(gpo: GpoConfig, field: 'enabled' | 'level' | 'fcnt' | 'lcnt' |
   state.project.patches.push({ sheet: 'GPIO', cell: cell?.address ?? '-', group: gpo.group, name: `entry${entryIndex}_${field.toUpperCase()}`, oldValue: normalizedOld, newValue });
 }
 
-function markDirty(root: HTMLElement): void {
+function markDirty(root: HTMLElement, preserveView = true): void {
   state.project.dirty = true;
-  state.message = '参数已修改，等待重新计算波形';
-  render(root);
+  state.message = '参数已修改，已实时刷新波形';
+  if (state.project.timing) recalc(root, { preserveView, clearTransientCursors: true });
+  else render(root);
 }
 
-function recalc(root: HTMLElement): void {
+function recalc(root: HTMLElement, options: { preserveView?: boolean; clearTransientCursors?: boolean; successMessage?: string } = {}): void {
   if (!state.project.timing) {
     state.message = '请先导入 XLSX';
     render(root);
     return;
   }
   try {
+    if (options.clearTransientCursors) clearTransientMeasurementCursors();
     state.project.simulation = simulateProject(state.project);
     const autoMapped = autoFillLevelInputsFromSimulation();
     if (autoMapped.length > 0) state.project.simulation = simulateProject(state.project);
-    state.project.dirty = false;
-    state.message = autoMapped.length > 0 ? `波形已重新计算，自动识别：${autoMapped.join('，')}` : '波形已重新计算';
-    if (state.referenceSignalId && centerOnReference()) {
-      state.message = '波形已重新计算，并已跳到参考边沿';
-    } else {
+    refreshMeasurementSnapshots();
+    state.project.dirty = state.project.patches.length > 0;
+    state.message = options.successMessage ?? (autoMapped.length > 0 ? `波形已重新计算，自动识别：${autoMapped.join('，')}` : '波形已重新计算');
+    if (!options.preserveView) {
       setDefaultView(state.viewMode);
     }
   } catch (error) {
@@ -1667,11 +1775,28 @@ function recalc(root: HTMLElement): void {
   render(root);
 }
 
+function refreshMeasurementSnapshots(): void {
+  const results = state.project.simulation?.measurements ?? [];
+  for (const result of results) {
+    const measurement = state.project.measurements.find((item) => item.id === result.id);
+    if (!measurement) continue;
+    if (result.startEdge) {
+      measurement.startEdgeId = result.startEdge.id;
+      measurement.startPoint = cloneMeasurementEdge(result.startEdge);
+    }
+    if (result.endEdge) {
+      measurement.endEdgeId = result.endEdge.id;
+      measurement.endPoint = cloneMeasurementEdge(result.endEdge);
+    }
+  }
+}
+
 function setDefaultView(kind: ViewMode): void {
   const t = state.project.timing;
   const sim = state.project.simulation;
   if (!t || !sim) return;
   state.viewMode = kind;
+  applyDefaultReference(kind);
   if (kind !== 'frame1' && kind !== 'frame120' && state.referenceSignalId && centerOnReference()) return;
   const framePcnt = t.pcntPerLine * t.vtotal;
   if (kind === 'frame1') {
@@ -1703,7 +1828,7 @@ function defaultViewCenter(kind: ViewMode, signals: SignalTrace[], linePcnt: num
 function headViewCenter(firstEdge: (token: string) => number | undefined, fallback: number): number {
   const model = state.project.levelShifter.model;
   if (model === 'single-iml7272b') return firstEdge('ls:stv1') ?? findImlInputEdge('stvIn1') ?? firstEdge('ls:clk') ?? fallback;
-  if (model === 'single-ek86752b') return firstEdge('driver_tp') ?? firstEdge('ls:stv1') ?? firstEdge('cpv1') ?? fallback;
+  if (model === 'single-ek86752b') return firstEdge('ls:stv1') ?? firstEdge('stv') ?? firstEdge('cpv1') ?? fallback;
   return firstEdge('stv') ?? fallback;
 }
 
@@ -1714,9 +1839,22 @@ function fallbackViewCenter(firstEdge: (token: string) => number | undefined): n
 function defaultCenterCandidates(firstEdge: (token: string) => number | undefined): Array<number | undefined> {
   const model = state.project.levelShifter.model;
   if (model === 'single-iml7272b') return [firstEdge('driver_tp'), firstEdge('init_tp'), findImlInputEdge('clkIn1'), findImlInputEdge('clkIn2'), firstEdge('ls:clk'), firstEdge('ls:stv1'), 0];
-  if (model === 'single-ek86752b') return [firstEdge('driver_tp'), firstEdge('cpv1'), firstEdge('ls:clk1'), firstEdge('ls:stv1'), 0];
+  if (model === 'single-ek86752b') return [firstEdge('cpv1'), firstEdge('ls:clk1'), firstEdge('driver_tp'), firstEdge('ls:stv1'), 0];
   if (model === 'none') return [firstEdge('cpv1'), firstEdge('cpv2'), firstEdge('stv'), 0];
   return [firstEdge('driver_tp'), firstEdge('init_tp'), firstEdge('cpv1'), 0];
+}
+
+function applyDefaultReference(kind: ViewMode): void {
+  if (state.project.timing?.soc !== 'mt9603') return;
+  if (kind === 'debug') setReferenceIfAvailable(['cpv1:merge', 'cpv1:raw']);
+  if (kind === 'head') setReferenceIfAvailable(['stv:merge', 'stv:raw', 'ls:stv1']);
+}
+
+function setReferenceIfAvailable(ids: string[]): void {
+  const signal = ids.map((id) => signalById(id)).find((item): item is SignalTrace => Boolean(item));
+  if (!signal) return;
+  state.referenceSignalId = signal.id;
+  state.referenceEdgeId = signal.edges[0]?.id;
 }
 
 function firstDefined(values: Array<number | undefined>): number {
@@ -2294,11 +2432,38 @@ function structuredCloneGpos(gpos: GpoConfig[]): GpoConfig[] {
   return JSON.parse(JSON.stringify(gpos)) as GpoConfig[];
 }
 
-function exportPatchedXlsx(): void {
+function countMemoryDiffs(): number {
+  if (!state.compareEnabled || !state.memoryGpos) return 0;
+  let count = 0;
+  for (const gpo of state.project.gpos) {
+    const old = state.memoryGpos.find((item) => item.index === gpo.index);
+    if (!old) {
+      count += 1;
+      continue;
+    }
+    const fields: Array<keyof GpoConfig> = ['combinType', 'combinSel', 'maskEnabled', 'regionVst', 'regionVend', 'regionPst', 'regionPend', 'regionOtherValue', 'repeatCount', 'repeatMode'];
+    count += fields.filter((field) => old[field] !== gpo[field]).length;
+    for (const entry of gpo.entries) {
+      const oldEntry = old.entries.find((item) => item.index === entry.index);
+      if (!oldEntry) {
+        count += 1;
+        continue;
+      }
+      if (oldEntry.fcnt !== entry.fcnt) count += 1;
+      if (oldEntry.enabled !== entry.enabled) count += 1;
+      if (oldEntry.level !== entry.level) count += 1;
+      if (oldEntry.lcnt !== entry.lcnt) count += 1;
+      if (oldEntry.pcnt !== entry.pcnt) count += 1;
+    }
+  }
+  return count;
+}
+
+function exportPatchedXlsx(root: HTMLElement): void {
   const parsed = state.project.parsed;
   if (!parsed || !state.sourceFileBuffer) return;
   if (!/\.xlsx$/i.test(state.sourceFileName ?? parsed.fileName)) {
-    alert('patched XLSX 只支持原始 .xlsx。xls/xlsm 不会重写整份文件，请导出 JSON patch 后用外部工具精确写入。');
+    alert('patched XLSX 只支持 .xlsx。请先把 .xls/.xlsm 另存或转换为 .xlsx 后再导入。');
     return;
   }
   if (state.project.patches.length === 0) {
@@ -2309,6 +2474,12 @@ function exportPatchedXlsx(): void {
     const out = patchXlsxZip(state.sourceFileBuffer, state.project.patches);
     const baseName = parsed.fileName.replace(/\.(xlsx|xlsm|xls)$/i, '');
     download(`${baseName}.patched.xlsx`, out, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    state.sourceFileBuffer = out.slice().buffer as ArrayBuffer;
+    state.sourceFileName = `${baseName}.patched.xlsx`;
+    state.project.patches = [];
+    state.project.dirty = false;
+    state.message = 'patched XLSX 已导出，当前 patch suggestion 已清空';
+    render(root);
   } catch (error) {
     alert(error instanceof Error ? error.message : String(error));
   }
@@ -2362,7 +2533,7 @@ function sheetXmlPaths(zip: Unzipped): Map<string, string> {
 
 function patchSheetCellXml(xml: string, cell: string, value: string | number | null): string {
   const escapedCell = escapeRegExp(cell);
-  const cellRe = new RegExp(`<c\\\\b([^>]*)\\\\br="${escapedCell}"([^>]*)>([\\\\s\\\\S]*?)<\\\\/c>`);
+  const cellRe = new RegExp(`<c\\b[^>]*\\br="${escapedCell}"[^>]*(?:\\/>|>[\\s\\S]*?<\\/c>)`);
   const match = xml.match(cellRe);
   const cellXml = makeCellXml(cell, value);
   if (!match) return insertCellXml(xml, cell, cellXml);
@@ -2378,10 +2549,31 @@ function makeCellXml(cell: string, value: string | number | null): string {
 function insertCellXml(xml: string, cell: string, cellXml: string): string {
   const rowNumber = Number(cell.match(/\d+/)?.[0] ?? 0);
   if (!rowNumber) throw new Error(`无效 cell 地址：${cell}`);
-  const rowRe = new RegExp(`(<row\\\\b[^>]*\\\\br="${rowNumber}"[^>]*>)([\\\\s\\\\S]*?)(<\\\\/row>)`);
+  const rowRe = new RegExp(`(<row\\b[^>]*\\br="${rowNumber}"[^>]*>)([\\s\\S]*?)(<\\/row>)`);
   const rowMatch = xml.match(rowRe);
-  if (!rowMatch) throw new Error(`sheet XML 中找不到 row ${rowNumber}，为避免破坏格式，已拒绝插入新行。`);
+  if (!rowMatch) {
+    const selfClosingRowRe = new RegExp(`<row\\b[^>]*\\br="${rowNumber}"[^>]*\\/>`);
+    if (selfClosingRowRe.test(xml)) return xml.replace(selfClosingRowRe, (row) => row.replace(/\/>$/, `>${cellXml}</row>`));
+    return insertRowXml(xml, rowNumber, cellXml);
+  }
   return xml.replace(rowRe, (_whole, open: string, body: string, close: string) => `${open}${insertCellInRow(body, cell, cellXml)}${close}`);
+}
+
+function insertRowXml(xml: string, rowNumber: number, cellXml: string): string {
+  const sheetDataRe = /(<sheetData[^>]*>)([\s\S]*?)(<\/sheetData>)/;
+  const match = xml.match(sheetDataRe);
+  if (!match) throw new Error(`sheet XML 中找不到 sheetData，无法插入 row ${rowNumber}。`);
+  const body = match[2];
+  const rowXml = `<row r="${rowNumber}">${cellXml}</row>`;
+  const rows = [...body.matchAll(/<row\b[^>]*\br="(\d+)"[^>]*(?:\/>|>[\s\S]*?<\/row>)/g)];
+  for (const row of rows) {
+    if (Number(row[1]) > rowNumber) {
+      const index = row.index ?? 0;
+      const nextBody = `${body.slice(0, index)}${rowXml}${body.slice(index)}`;
+      return xml.replace(sheetDataRe, `${match[1]}${nextBody}${match[3]}`);
+    }
+  }
+  return xml.replace(sheetDataRe, `${match[1]}${body}${rowXml}${match[3]}`);
 }
 
 function insertCellInRow(rowBody: string, cell: string, cellXml: string): string {
@@ -2396,17 +2588,24 @@ function insertCellInRow(rowBody: string, cell: string, cellXml: string): string
   return `${rowBody}${cellXml}`;
 }
 
-function exportPatchJson(): void {
-  download(`goa-patch-${Date.now()}.json`, JSON.stringify(state.project.patches, null, 2), 'application/json');
-}
-
-function exportLevelShifterJson(): void {
-  const payload = {
+function levelShifterPayload(): { version: number; levelShifter: unknown; tpGenerator: TpGeneratorConfig } {
+  return {
     version: 1,
     levelShifter: levelShifterReportState(),
     tpGenerator: state.project.tpGenerator ?? defaultTpGeneratorConfig(),
   };
-  download(`goa-level-shifter-${Date.now()}.json`, JSON.stringify(payload, null, 2), 'application/json');
+}
+
+function exportLevelShifterBin(): void {
+  download(`goa-level-shifter-${Date.now()}.bin`, JSON.stringify(levelShifterPayload(), null, 2), 'application/octet-stream');
+}
+
+async function importLevelShifterBin(root: HTMLElement, input: HTMLInputElement): Promise<void> {
+  await importLevelShifterJson(root, input);
+}
+
+function parseLevelShifterPayload(text: string): { levelShifter?: unknown; tpGenerator?: unknown } {
+  return JSON.parse(text) as { levelShifter?: unknown; tpGenerator?: unknown };
 }
 
 async function importLevelShifterJson(root: HTMLElement, input: HTMLInputElement): Promise<void> {
@@ -2414,11 +2613,11 @@ async function importLevelShifterJson(root: HTMLElement, input: HTMLInputElement
   input.value = '';
   if (!file) return;
   try {
-    const payload = JSON.parse(await file.text()) as { levelShifter?: unknown };
+    const payload = parseLevelShifterPayload(await file.text());
     const parsed = parseLevelShifterConfig(payload.levelShifter ?? payload);
-    if (!parsed) throw new Error('LS JSON 格式不对：需要 model=single-ek86707a / dual-ek86707a / single-iml7272b / single-ek86752b。');
+    if (!parsed) throw new Error('LS BIN 格式不对：需要 model=single-ek86707a / dual-ek86707a / single-iml7272b / single-ek86752b。');
     state.project.levelShifter = parsed;
-    state.project.tpGenerator = parseTpGeneratorConfig((payload as { tpGenerator?: unknown }).tpGenerator);
+    state.project.tpGenerator = parseTpGeneratorConfig(payload.tpGenerator);
     state.referenceSignalId = undefined;
     state.referenceEdgeId = undefined;
     state.extraSignalIds = [];
@@ -2554,69 +2753,6 @@ function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
-function exportMeasurementCsv(): void {
-  const rows = [['ID', 'Start', 'End', 'Delta PCNT', 'Time seconds', 'Target seconds', 'Error seconds']];
-  for (const m of state.project.simulation?.measurements ?? []) {
-    rows.push([m.id, edgeLabel(m.startEdge), edgeLabel(m.endEdge), String(m.deltaPcnt ?? ''), String(m.seconds ?? ''), String(m.targetSeconds ?? ''), String(m.errorSeconds ?? '')]);
-  }
-  download(`goa-measurements-${Date.now()}.csv`, rows.map((row) => row.map(csvCell).join(',')).join('\n'), 'text/csv');
-}
-
-function exportWaveformPng(root: HTMLElement): void {
-  const canvas = root.querySelector<HTMLCanvasElement>('#waveCanvas');
-  if (!canvas) return;
-  const link = document.createElement('a');
-  link.download = `goa-waveform-${Date.now()}.png`;
-  link.href = canvas.toDataURL('image/png');
-  link.click();
-}
-
-function exportHtmlReport(root: HTMLElement): void {
-  const canvas = root.querySelector<HTMLCanvasElement>('#waveCanvas');
-  const image = canvas?.toDataURL('image/png') ?? '';
-  const timing = state.project.timing;
-  const measurements = state.project.simulation?.measurements ?? [];
-  const warnings = state.project.simulation?.warnings ?? [];
-  const html = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <title>GOA Timing Report</title>
-  <style>
-    body { margin: 0; padding: 28px; background: #08111e; color: #dbe7f7; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    h1 { margin: 0 0 14px; font: 700 30px Georgia, serif; letter-spacing: -0.04em; }
-    .card { border: 1px solid #29364a; background: #0d1726; padding: 16px; margin: 14px 0; }
-    img { max-width: 100%; border: 1px solid #29364a; background: #060b13; }
-    table { width: 100%; border-collapse: collapse; }
-    td, th { border: 1px solid #29364a; padding: 8px; text-align: left; }
-    th { background: #142238; }
-    .muted { color: #8da1bb; }
-  </style>
-</head>
-<body>
-  <h1>GOA Timing Report</h1>
-  <div class="card">
-    <div>文件：${htmlText(state.project.parsed?.fileName ?? '-')}</div>
-    <div>视图：${htmlText(viewLabel(state.viewMode))}</div>
-    <div>时间基准：${timing ? `SoC=${timing.soc}, Htotal=${timing.panelHtotal}, pcnt/line=${timing.pcntPerLine}, Vtotal=${timing.vtotal}, FPS=${timing.frameRate}, 1pcnt=${(timing.pcntSeconds * 1e9).toFixed(3)}ns` : '-'}</div>
-    <pre>${htmlText(JSON.stringify(levelShifterReportState(), null, 2))}</pre>
-  </div>
-  <div class="card"><img src="${image}" alt="waveform" /></div>
-  <div class="card">
-    <h2>Measurement</h2>
-    <table><thead><tr><th>ID</th><th>Start</th><th>End</th><th>Delta</th><th>Target</th><th>当前-目标</th></tr></thead><tbody>
-      ${measurements.map((m) => `<tr><td>${htmlText(m.id)}</td><td>${htmlText(edgeLabel(m.startEdge))}</td><td>${htmlText(edgeLabel(m.endEdge))}</td><td>${safeBreaks(formatMeasurementPcnt(m.deltaPcnt))} / ${htmlText(formatDuration(m.seconds))}</td><td>${htmlText(formatDuration(m.targetSeconds))}</td><td>${safeBreaks(formatTargetDelta(m))}</td></tr>`).join('')}
-    </tbody></table>
-  </div>
-  <div class="card">
-    <h2>Warnings</h2>
-    ${warnings.length ? warnings.map((warning) => `<div>${htmlText(warning)}</div>`).join('') : '<div class="muted">无</div>'}
-  </div>
-</body>
-</html>`;
-  download(`goa-report-${Date.now()}.html`, html, 'text/html');
-}
-
 function levelShifterReportState(): unknown {
   const ls = state.project.levelShifter;
   if (ls.model === 'single-iml7272b') {
@@ -2650,10 +2786,6 @@ function levelShifterReportState(): unknown {
   }
   if (isEkConfig(ls)) return { ...ls, outputCount: ek86707aSet1OutputCount(ls.set1) * (ls.model === 'dual-ek86707a' ? 2 : 1) };
   return ls;
-}
-
-function safeBreaks(value: string): string {
-  return htmlText(value).replaceAll('&lt;br&gt;', '<br>');
 }
 
 function cellAddressOrder(cell: string): number {
@@ -2694,10 +2826,6 @@ function download(name: string, content: string | Uint8Array, type: string): voi
   a.download = name;
   a.click();
   URL.revokeObjectURL(url);
-}
-
-function csvCell(value: string): string {
-  return `"${value.replaceAll('"', '""')}"`;
 }
 
 function htmlText(value: string): string {

@@ -228,6 +228,8 @@ export type Measurement = {
   id: string;
   startEdgeId: string;
   endEdgeId: string;
+  startPoint?: Edge;
+  endPoint?: Edge;
   targetSeconds?: number;
   targetInput?: string;
   notes?: string;
