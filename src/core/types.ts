@@ -222,6 +222,7 @@ export type LevelShifterConfig = NoLevelShifterConfig | Ek86707aConfig | DualEk8
 export type TpGeneratorConfig = {
   driverTpWidth: string;
   driverTpPeriod: string;
+  driverTpPeriodMode: 'line' | 'time' | 'pcnt';
 };
 
 export type Measurement = {
@@ -291,6 +292,7 @@ export type DraftProject = {
 export const defaultTpGeneratorConfig = (): TpGeneratorConfig => ({
   driverTpWidth: '3us',
   driverTpPeriod: '',
+  driverTpPeriodMode: 'line',
 });
 
 export const defaultNoLevelShifterConfig = (): NoLevelShifterConfig => ({

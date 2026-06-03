@@ -731,13 +731,27 @@ function mt9603DriverTpPanel(): string {
   const tp = state.project.tpGenerator ?? defaultTpGeneratorConfig();
   const timing = state.project.timing;
   const oneLineUs = timing ? timing.lcntSeconds * 1e6 : 0;
+  const linePcnt = timing?.pcntPerLine ?? 0;
+  const periodMode = tp.driverTpPeriodMode ?? 'line';
+  const periodInput = periodMode === 'line'
+    ? `<label>周期 <input value="1 line = ${oneLineUs.toFixed(3)}us / ${linePcnt}pcnt" disabled /></label>`
+    : periodMode === 'pcnt'
+      ? `<label>周期 PCNT <input data-tp-generator="driverTpPeriod" value="${htmlAttr(normalizeTpPcntInput(tp.driverTpPeriod, linePcnt))}" placeholder="${linePcnt}pcnt" /></label>`
+      : `<label>周期时间 <input data-tp-generator="driverTpPeriod" value="${htmlAttr(normalizeTpDurationInput(tp.driverTpPeriod, true))}" placeholder="7.4us；裸数字按 us" /></label>`;
   return `
     <section class="panelSection">
       <h3>MT9603 Driver_TP / data_cmd</h3>
-      <div class="callout ok">Driver_TP 不从 GPO 生成，也不做 mask；固定从 L0.P2 起跳。宽度/周期支持 300ns、1.1us、3us；裸数字会自动保存成 us，周期留空则按 1line=${oneLineUs.toFixed(3)}us。</div>
+      <div class="callout ok">Driver_TP 不从 GPO 生成，也不做 mask；固定从 L0.P2 起跳。周期默认跟随 1 line，改 Htotal / Vtotal / FPS 时会同步换算；只有切到固定时间或固定 PCNT 才锁死。</div>
       <div class="formGrid">
         <label>正脉冲宽度 <input data-tp-generator="driverTpWidth" value="${htmlAttr(normalizeTpDurationInput(tp.driverTpWidth, false))}" placeholder="默认 3us；300ns 需写 ns" /></label>
-        <label>周期 <input data-tp-generator="driverTpPeriod" value="${htmlAttr(normalizeTpDurationInput(tp.driverTpPeriod, true))}" placeholder="空=1line；裸数字按 us" /></label>
+        <label>周期模式
+          <select data-tp-generator-mode="driverTpPeriodMode">
+            ${selectOption('line', '跟随 1 line', periodMode)}
+            ${selectOption('time', '固定时间', periodMode)}
+            ${selectOption('pcnt', '固定 PCNT', periodMode)}
+          </select>
+        </label>
+        ${periodInput}
         <label>起点 <input value="L0.P2" disabled /></label>
       </div>
     </section>`;
@@ -1064,6 +1078,10 @@ function imlOptions(options: Array<[number, string]>, selected: number): string 
   return options.map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${htmlText(label)}</option>`).join('');
 }
 
+function selectOption(value: string, label: string, selected: string): string {
+  return `<option value="${htmlAttr(value)}" ${value === selected ? 'selected' : ''}>${htmlText(label)}</option>`;
+}
+
 function boolOptions(lowLabel: string, highLabel: string): Array<[string, string]> {
   return [['false', lowLabel], ['true', highLabel]];
 }
@@ -1384,9 +1402,24 @@ function bindPanelEvents(root: HTMLElement): void {
     input.addEventListener('change', () => {
       const key = input.dataset.tpGenerator as keyof TpGeneratorConfig;
       const current = state.project.tpGenerator ?? defaultTpGeneratorConfig();
-      const normalized = normalizeTpDurationInput(input.value, key === 'driverTpPeriod');
+      const normalized = key === 'driverTpPeriod' && (current.driverTpPeriodMode ?? 'line') === 'pcnt'
+        ? normalizeTpPcntInput(input.value, state.project.timing?.pcntPerLine ?? 0)
+        : normalizeTpDurationInput(input.value, key === 'driverTpPeriod');
       input.value = normalized;
       state.project.tpGenerator = { ...current, [key]: normalized };
+      markDirty(root);
+    });
+  });
+  root.querySelectorAll<HTMLSelectElement>('[data-tp-generator-mode]').forEach((select) => {
+    select.addEventListener('change', () => {
+      const key = select.dataset.tpGeneratorMode as keyof TpGeneratorConfig;
+      const current = state.project.tpGenerator ?? defaultTpGeneratorConfig();
+      const mode = parseTpPeriodMode(select.value);
+      state.project.tpGenerator = {
+        ...current,
+        [key]: mode,
+        driverTpPeriod: mode === 'line' ? '' : current.driverTpPeriod,
+      };
       markDirty(root);
     });
   });
@@ -2441,6 +2474,18 @@ function normalizeTpDurationInput(value: string, allowBlank: boolean): string {
   return `${match[1]}${unit}`;
 }
 
+function normalizeTpPcntInput(value: string, fallbackPcnt: number): string {
+  const text = value.trim().toLowerCase().replace(/\s*pcnt$/, '');
+  if (!text) return fallbackPcnt > 0 ? String(fallbackPcnt) : '';
+  const amount = Number(text);
+  if (!Number.isFinite(amount) || amount <= 0) return value.trim();
+  return String(Math.round(amount));
+}
+
+function parseTpPeriodMode(value: unknown): TpGeneratorConfig['driverTpPeriodMode'] {
+  return value === 'time' || value === 'pcnt' || value === 'line' ? value : 'line';
+}
+
 function formatTargetDelta(m: NonNullable<DraftProject['simulation']>['measurements'][number]): string {
   if (m.targetSeconds === undefined) return '未设置 target';
   if (m.errorSeconds === undefined || m.errorPcnt === undefined) return '-';
@@ -2767,9 +2812,16 @@ function parseTpGeneratorConfig(value: unknown): TpGeneratorConfig {
   const defaults = defaultTpGeneratorConfig();
   if (!value || typeof value !== 'object') return defaults;
   const source = value as Record<string, unknown>;
+  const storedPeriod = typeof source.driverTpPeriod === 'string' ? source.driverTpPeriod : defaults.driverTpPeriod;
+  const periodMode = typeof source.driverTpPeriodMode === 'string'
+    ? parseTpPeriodMode(source.driverTpPeriodMode)
+    : storedPeriod.trim()
+      ? 'time'
+      : defaults.driverTpPeriodMode;
   return {
     driverTpWidth: typeof source.driverTpWidth === 'string' ? normalizeTpDurationInput(source.driverTpWidth, false) : defaults.driverTpWidth,
-    driverTpPeriod: typeof source.driverTpPeriod === 'string' ? normalizeTpDurationInput(source.driverTpPeriod, true) : defaults.driverTpPeriod,
+    driverTpPeriod: periodMode === 'pcnt' ? normalizeTpPcntInput(storedPeriod, 0) : normalizeTpDurationInput(storedPeriod, true),
+    driverTpPeriodMode: periodMode,
   };
 }
 

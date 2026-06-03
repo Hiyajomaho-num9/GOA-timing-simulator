@@ -120,7 +120,7 @@ function buildMt9603DriverTp(config: TpGeneratorConfig, timing: TimingBase, warn
   const total = timing.pcntPerLine * timing.vtotal;
   const start = Math.min(2, Math.max(0, total - 1));
   const width = parseDurationToPcnt(config.driverTpWidth, timing, 3e-6);
-  const period = parseDurationToPcnt(config.driverTpPeriod, timing, timing.lcntSeconds);
+  const period = parseMt9603DriverTpPeriod(config, timing);
   const effectivePeriod = Math.max(1, period);
   let effectiveWidth = Math.max(1, width);
   if (effectiveWidth >= effectivePeriod) {
@@ -145,6 +145,17 @@ function parseDurationToPcnt(value: string, timing: TimingBase, fallbackSeconds:
   const unit = match[2] ?? 'us';
   const scale = unit === 'ns' ? 1e-9 : unit === 'ms' ? 1e-3 : unit === 's' ? 1 : 1e-6;
   return Math.max(1, Math.round((amount * scale) / timing.pcntSeconds));
+}
+
+function parseMt9603DriverTpPeriod(config: TpGeneratorConfig, timing: TimingBase): number {
+  const mode = config.driverTpPeriodMode ?? 'line';
+  if (mode === 'line') return Math.max(1, timing.pcntPerLine);
+  if (mode === 'pcnt') {
+    const text = config.driverTpPeriod.trim().toLowerCase().replace(/\s*pcnt$/, '');
+    const amount = Number(text);
+    return Number.isFinite(amount) && amount > 0 ? Math.max(1, Math.round(amount)) : Math.max(1, timing.pcntPerLine);
+  }
+  return parseDurationToPcnt(config.driverTpPeriod, timing, timing.lcntSeconds);
 }
 
 function simulateGpoBase(gpo: GpoConfig, timing: TimingBase, bypassMask: boolean): Segment[] {
