@@ -112,7 +112,6 @@ function layout(): string {
     <div class="shell">
       <header class="topbar">
         <div class="brandBlock">
-          <p id="socEyebrow" class="eyebrow">MT9216 / MT9603 · Rust-ready engine · XLSX native tuning</p>
           <h1>GOA Timing Simulator</h1>
         </div>
         <div id="timebase" class="timebase">未导入</div>
@@ -454,13 +453,10 @@ function quickSelectGpo(root: HTMLElement, value: string): void {
 function renderTimebase(root: HTMLElement): void {
   const t = state.project.timing;
   const target = root.querySelector('#timebase')!;
-  const eyebrow = root.querySelector('#socEyebrow');
   if (!t) {
     target.textContent = '未导入 XLSX';
-    if (eyebrow) eyebrow.textContent = 'MT9216 / MT9603 · Rust-ready engine · XLSX native tuning';
     return;
   }
-  if (eyebrow) eyebrow.textContent = `${t.soc.toUpperCase()} · ${t.pcntFormula} · XLSX native tuning`;
   target.innerHTML = `
     <b>Htotal</b> ${t.panelHtotal} <span>${t.soc === 'mt9603' ? `pcnt/line=${t.pcntPerLine}` : `reg=${t.htotalRegister}`}</span><br/>
     <b>Vtotal</b> ${t.vtotal} <b>FPS</b> ${t.frameRate}<br/>

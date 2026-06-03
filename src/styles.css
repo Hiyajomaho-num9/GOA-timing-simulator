@@ -85,8 +85,7 @@ label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; text-tran
   padding: 8px 14px;
   box-shadow: var(--shadow);
 }
-.brandBlock { display: flex; align-items: baseline; gap: 16px; min-width: 0; }
-.eyebrow { margin: 0; color: var(--accent); font: 700 11px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; }
+.brandBlock { display: flex; align-items: center; min-width: 0; }
 h1 { margin: 0; font-family: var(--serif); font-size: clamp(24px, 3vw, 38px); line-height: 0.95; letter-spacing: -0.07em; white-space: nowrap; font-weight: 800; }
 .timebase {
   min-width: 340px;
