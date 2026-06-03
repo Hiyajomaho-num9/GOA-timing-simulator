@@ -2,7 +2,7 @@ import { strFromU8, strToU8, unzipSync, zipSync, type Unzipped } from 'fflate';
 import { defaultDualEk86707aConfig, defaultEk86752bConfig, defaultIml7272bConfig, defaultLevelShifterConfig, defaultNoLevelShifterConfig, defaultTpGeneratorConfig, ek86707aSet1OutputCount, type DraftProject, type DualEk86707aConfig, type Edge, type Ek86707aConfig, type Ek86707aInputs, type Ek86752bConfig, type Ek86752bInputs, type EkSet1Level, type GpoConfig, type Iml7272bConfig, type LevelShifterConfig, type SignalTrace, type SocProfile, type TpGeneratorConfig } from '../core/types';
 import { parseXlsxBuffer, type SocProfileSelection } from '../core/xlsxParser';
 import { simulateGpoOutWindow, simulateGpoWindow, simulateProject } from '../core/simulator';
-import { formatCount4, formatDuration, formatPcnt } from '../core/time';
+import { formatCount4, formatDuration, formatPcnt, makeTimingBase } from '../core/time';
 import { drawWaveform, type WaveformHitMap, type WaveformView } from './waveformCanvas';
 
 type ViewMode = 'debug' | 'head' | 'tail' | 'frame1' | 'frame120';
@@ -119,6 +119,8 @@ function layout(): string {
       <section class="commandBar">
         <label class="file-picker">导入 XLSX<input id="fileInput" type="file" accept=".xlsx,.xlsm,.xls" /></label>
         <label>SoC Profile <select id="socProfile"><option value="auto">Auto</option><option value="mt9216">MT9216</option><option value="mt9603">MT9603 / MT9633</option></select></label>
+        <label>Htotal <input id="htotalInput" type="number" min="1" step="1" placeholder="-" /></label>
+        <label>Vtotal <input id="vtotalInput" type="number" min="1" step="1" placeholder="-" /></label>
         <label>Frame Rate <input id="frameRate" type="number" min="1" step="0.01" value="60" /></label>
         <label>GPO Quick <input id="quickGpoInput" list="gpoQuickList" placeholder="GPO6 / CPV1 / RST" /><datalist id="gpoQuickList"></datalist></label>
         <label class="check compactCheck"><input id="compareToggle" type="checkbox" /> Compare memory</label>
@@ -221,6 +223,9 @@ function bindStaticEvents(root: HTMLElement): void {
   root.querySelector<HTMLButtonElement>('#exportLsBinBtn')?.addEventListener('click', exportLevelShifterBin);
   root.querySelector<HTMLInputElement>('#lsBinInput')?.addEventListener('change', async (event) => importLevelShifterBin(root, event.currentTarget as HTMLInputElement));
   root.querySelector<HTMLInputElement>('#quickGpoInput')?.addEventListener('input', (event) => quickSelectGpo(root, (event.currentTarget as HTMLInputElement).value));
+  root.querySelector<HTMLInputElement>('#htotalInput')?.addEventListener('input', () => updateTimingFromControls(root));
+  root.querySelector<HTMLInputElement>('#vtotalInput')?.addEventListener('input', () => updateTimingFromControls(root));
+  root.querySelector<HTMLInputElement>('#frameRate')?.addEventListener('input', () => updateTimingFromControls(root));
   root.querySelector<HTMLInputElement>('#compareToggle')?.addEventListener('change', (event) => {
     state.compareEnabled = (event.currentTarget as HTMLInputElement).checked;
     render(root);
@@ -383,6 +388,7 @@ function render(root: HTMLElement): void {
   renderEdgeCursor(root);
   renderWarnings(root);
   renderSocProfileControl(root);
+  renderTimingControls(root);
   draw(root);
 }
 
@@ -426,6 +432,45 @@ function renderSocProfileControl(root: HTMLElement): void {
   const select = root.querySelector<HTMLSelectElement>('#socProfile');
   if (!select) return;
   select.value = state.socProfileChoice;
+}
+
+function renderTimingControls(root: HTMLElement): void {
+  const timing = state.project.timing;
+  const htotal = root.querySelector<HTMLInputElement>('#htotalInput');
+  const vtotal = root.querySelector<HTMLInputElement>('#vtotalInput');
+  const frameRate = root.querySelector<HTMLInputElement>('#frameRate');
+  if (!htotal || !vtotal || !frameRate) return;
+  htotal.disabled = !timing;
+  vtotal.disabled = !timing;
+  if (!timing) {
+    htotal.value = '';
+    vtotal.value = '';
+    return;
+  }
+  htotal.value = String(timing.panelHtotal);
+  vtotal.value = String(timing.vtotal);
+  frameRate.value = String(timing.frameRate);
+}
+
+function updateTimingFromControls(root: HTMLElement): void {
+  const current = state.project.timing;
+  if (!current) return;
+  const htotalValue = Number(root.querySelector<HTMLInputElement>('#htotalInput')?.value);
+  const vtotalValue = Number(root.querySelector<HTMLInputElement>('#vtotalInput')?.value);
+  const frameRateValue = Number(root.querySelector<HTMLInputElement>('#frameRate')?.value);
+  if (!Number.isFinite(htotalValue) || htotalValue < 1) return;
+  if (!Number.isFinite(vtotalValue) || vtotalValue < 1) return;
+  if (!Number.isFinite(frameRateValue) || frameRateValue <= 0) return;
+  const nextTiming = makeTimingBase(Math.round(htotalValue) - 1, Math.round(vtotalValue), frameRateValue, {
+    soc: current.soc,
+    panelMinHtotal: current.panelMinHtotal,
+    panelMinVtotal: current.panelMinVtotal,
+    panelDclk: current.panelDclk,
+  });
+  state.project.timing = nextTiming;
+  if (state.project.parsed) state.project.parsed.timing = nextTiming;
+  state.message = `timebase 已更新：Htotal=${nextTiming.panelHtotal}, Vtotal=${nextTiming.vtotal}, FPS=${nextTiming.frameRate}`;
+  recalc(root, { preserveView: true, clearTransientCursors: true, successMessage: state.message });
 }
 
 function renderGpoQuickList(root: HTMLElement): void {
@@ -1811,9 +1856,10 @@ function setDefaultView(kind: ViewMode): void {
 function defaultViewCenter(kind: ViewMode, signals: SignalTrace[], linePcnt: number, vtotal: number): number {
   const firstEdge = (token: string) => signals.find((signal) => signal.id.includes(token))?.edges[0]?.at;
   const lastEdge = (token: string) => signals.filter((signal) => signal.id.includes(token)).flatMap((signal) => signal.edges).at(-1)?.at;
+  const lastEdgeExact = (id: string) => signals.find((signal) => signal.id === id)?.edges.at(-1)?.at;
   const tailFallback = Math.max(0, linePcnt * (vtotal - 6));
   if (kind === 'tail') {
-    if (state.project.timing?.soc === 'mt9603' && isLevelShifterClockMode()) return lastEdge('ls:clk1') ?? lastEdge('ls:clk') ?? tailFallback;
+    if (state.project.timing?.soc === 'mt9603' && isLevelShifterClockMode()) return lastEdgeExact('ls:clk1') ?? lastEdge('ls:clk') ?? tailFallback;
     return isLevelShifterClockMode()
       ? lastEdge('ls:clk') ?? tailFallback
       : lastEdge('ck') ?? firstEdge('cpv2') ?? tailFallback;
@@ -1845,14 +1891,14 @@ function applyDefaultReference(kind: ViewMode): void {
   if (state.project.timing?.soc !== 'mt9603') return;
   if (kind === 'debug') setReferenceIfAvailable(['cpv1:merge', 'cpv1:raw']);
   if (kind === 'head') setReferenceIfAvailable(['stv:merge', 'stv:raw', 'ls:stv1']);
-  if (kind === 'tail') setReferenceIfAvailable(['ls:clk1']);
+  if (kind === 'tail') setReferenceIfAvailable(['ls:clk1'], 'last');
 }
 
-function setReferenceIfAvailable(ids: string[]): void {
+function setReferenceIfAvailable(ids: string[], edgePick: 'first' | 'last' = 'first'): void {
   const signal = ids.map((id) => signalById(id)).find((item): item is SignalTrace => Boolean(item));
   if (!signal) return;
   state.referenceSignalId = signal.id;
-  state.referenceEdgeId = signal.edges[0]?.id;
+  state.referenceEdgeId = edgePick === 'last' ? signal.edges.at(-1)?.id : signal.edges[0]?.id;
 }
 
 function firstDefined(values: Array<number | undefined>): number {
