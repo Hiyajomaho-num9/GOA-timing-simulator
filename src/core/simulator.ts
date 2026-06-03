@@ -195,7 +195,7 @@ function byFrameSegments(gpo: GpoConfig, entries: GpoConfig['entries'], timing: 
     .filter((event) => event.at >= 0 && event.at < periodTotal)
     .sort((a, b) => a.at - b.at || a.entry.index - b.entry.index);
   let cursor = 0;
-  let level: LogicLevel = events.at(-1)?.entry.level ?? 0;
+  let level: LogicLevel = events.length > 0 ? events[events.length - 1].entry.level : 0;
   const segments: Segment[] = [];
   for (let periodStart = 0; periodStart < total; periodStart += periodTotal) {
     for (const event of events) {

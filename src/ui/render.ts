@@ -1888,8 +1888,8 @@ function setDefaultView(kind: ViewMode): void {
 
 function defaultViewCenter(kind: ViewMode, signals: SignalTrace[], linePcnt: number, vtotal: number): number {
   const firstEdge = (token: string) => signals.find((signal) => signal.id.includes(token))?.edges[0]?.at;
-  const lastEdge = (token: string) => signals.filter((signal) => signal.id.includes(token)).flatMap((signal) => signal.edges).at(-1)?.at;
-  const lastEdgeExact = (id: string) => signals.find((signal) => signal.id === id)?.edges.at(-1)?.at;
+  const lastEdge = (token: string) => lastItem(signals.filter((signal) => signal.id.includes(token)).flatMap((signal) => signal.edges))?.at;
+  const lastEdgeExact = (id: string) => lastItem(signals.find((signal) => signal.id === id)?.edges ?? [])?.at;
   const tailFallback = Math.max(0, linePcnt * (vtotal - 6));
   if (kind === 'tail') {
     if (state.project.timing?.soc === 'mt9603' && isLevelShifterClockMode()) return lastEdgeExact('ls:clk1') ?? lastEdge('ls:clk') ?? tailFallback;
@@ -1931,11 +1931,15 @@ function setReferenceIfAvailable(ids: string[], edgePick: 'first' | 'last' = 'fi
   const signal = ids.map((id) => signalById(id)).find((item): item is SignalTrace => Boolean(item));
   if (!signal) return;
   state.referenceSignalId = signal.id;
-  state.referenceEdgeId = edgePick === 'last' ? signal.edges.at(-1)?.id : signal.edges[0]?.id;
+  state.referenceEdgeId = edgePick === 'last' ? lastItem(signal.edges)?.id : signal.edges[0]?.id;
 }
 
 function firstDefined(values: Array<number | undefined>): number {
   return values.find((value) => value !== undefined) ?? 0;
+}
+
+function lastItem<T>(items: T[]): T | undefined {
+  return items.length > 0 ? items[items.length - 1] : undefined;
 }
 
 function isLevelShifterClockMode(): boolean {
@@ -2599,11 +2603,11 @@ function sheetXmlPaths(zip: Unzipped): Map<string, string> {
   const workbook = strFromU8(workbookXml);
   const rels = strFromU8(relsXml);
   const ridToTarget = new Map<string, string>();
-  for (const rel of rels.matchAll(/<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bTarget="([^"]+)"[^>]*>/g)) {
+  for (const rel of allMatches(rels, /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bTarget="([^"]+)"[^>]*>/g)) {
     ridToTarget.set(xmlDecode(rel[1]), xmlDecode(rel[2]));
   }
   const result = new Map<string, string>();
-  for (const sheet of workbook.matchAll(/<sheet\b[^>]*\bname="([^"]+)"[^>]*\br:id="([^"]+)"[^>]*\/?>/g)) {
+  for (const sheet of allMatches(workbook, /<sheet\b[^>]*\bname="([^"]+)"[^>]*\br:id="([^"]+)"[^>]*\/?>/g)) {
     const name = xmlDecode(sheet[1]);
     const rid = xmlDecode(sheet[2]);
     const target = ridToTarget.get(rid);
@@ -2648,7 +2652,7 @@ function insertRowXml(xml: string, rowNumber: number, cellXml: string): string {
   if (!match) throw new Error(`sheet XML 中找不到 sheetData，无法插入 row ${rowNumber}。`);
   const body = match[2];
   const rowXml = `<row r="${rowNumber}">${cellXml}</row>`;
-  const rows = [...body.matchAll(/<row\b[^>]*\br="(\d+)"[^>]*(?:\/>|>[\s\S]*?<\/row>)/g)];
+  const rows = allMatches(body, /<row\b[^>]*\br="(\d+)"[^>]*(?:\/>|>[\s\S]*?<\/row>)/g);
   for (const row of rows) {
     if (Number(row[1]) > rowNumber) {
       const index = row.index ?? 0;
@@ -2661,7 +2665,7 @@ function insertRowXml(xml: string, rowNumber: number, cellXml: string): string {
 
 function insertCellInRow(rowBody: string, cell: string, cellXml: string): string {
   const target = cellAddressOrder(cell);
-  const cells = [...rowBody.matchAll(/<c\b[^>]*\br="([^"]+)"[^>]*(?:\/>|>[\s\S]*?<\/c>)/g)];
+  const cells = allMatches(rowBody, /<c\b[^>]*\br="([^"]+)"[^>]*(?:\/>|>[\s\S]*?<\/c>)/g);
   for (const existing of cells) {
     if (cellAddressOrder(existing[1]) > target) {
       const index = existing.index ?? 0;
@@ -2886,25 +2890,37 @@ function cellAddressOrder(cell: string): number {
   return Number(match[2]) * 100000 + col;
 }
 
+function allMatches(text: string, re: RegExp): RegExpExecArray[] {
+  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
+  const globalRe = new RegExp(re.source, flags);
+  const matches: RegExpExecArray[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = globalRe.exec(text))) {
+    matches.push(match);
+    if (match[0].length === 0) globalRe.lastIndex += 1;
+  }
+  return matches;
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function xmlEncode(value: string): string {
   return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function xmlDecode(value: string): string {
   return value
-    .replaceAll('&quot;', '"')
-    .replaceAll('&apos;', "'")
-    .replaceAll('&gt;', '>')
-    .replaceAll('&lt;', '<')
-    .replaceAll('&amp;', '&');
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
 }
 
 function download(name: string, content: string | Uint8Array, type: string): void {
@@ -2919,9 +2935,9 @@ function download(name: string, content: string | Uint8Array, type: string): voi
 }
 
 function htmlText(value: string): string {
-  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function htmlAttr(value: string): string {
-  return htmlText(value).replaceAll('"', '&quot;');
+  return htmlText(value).replace(/"/g, '&quot;');
 }
