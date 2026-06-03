@@ -171,7 +171,7 @@ function layout(): string {
         <section class="inspectorPane">
           <div class="inspectorTitle">
             <div>
-              <strong>参数调试台</strong>
+              <strong>调试台</strong>
               <span>只生成 patch suggestion；精调仍按 XLSX 原生字段修改。</span>
             </div>
             <button id="dockToggleBtn">收起</button>
@@ -579,7 +579,7 @@ function renderEdgeCursor(root: HTMLElement): void {
 
 function renderTabs(root: HTMLElement): void {
   const tabs = [
-    ['level', 'Level Shifter', 'LS 参数'],
+    ['level', 'Level Shifter', 'LS Hex'],
     ['gpio', 'GPIO Timing', 'GPO 原生'],
     ['combin', 'Combin / Mask', '逻辑遮罩'],
     ['measure', 'Measurement', '测量计算'],
@@ -609,7 +609,7 @@ function levelPanel(): string {
   const ls = state.project.levelShifter;
   const mt9603Tp = state.project.timing?.soc === 'mt9603' ? mt9603DriverTpPanel() : '';
   const header = `
-    <h2>Level Shifter 参数</h2>
+    <h2>Level Shifter Hex</h2>
     <section class="panelSection">
       <label class="modelPicker">Level Shifter 方案
         <select id="levelShifterModel">
@@ -630,7 +630,7 @@ function levelPanel(): string {
     ${mt9603Tp}
     <section class="panelSection">
       <div class="sectionHead">
-        <h3>${isDualEk ? '双 EK86707A 共用参数' : '单 EK86707A 参数'}</h3>
+        <h3>${isDualEk ? '双 EK86707A 共用调试参数' : '单 EK86707A 调试参数'}</h3>
         <span class="sectionMeta">统一按 pin / mode value 调参，配置共用到 CK preview</span>
       </div>
       <div class="ekParamGrid">
@@ -701,7 +701,7 @@ function mt9603DriverTpPanel(): string {
 function iml7272bPanel(ls: Iml7272bConfig): string {
   return `
     <section class="panelSection">
-      <h3>单 iML7272B 参数</h3>
+      <h3>单 iML7272B Hex</h3>
       <div class="callout ok">Reg01h~Reg04h 独立保存在 project/report，不写入 patched XLSX。OCP / FAULT / Slew / DIS_SENSE 第一版只保存，不影响波形。</div>
       <div class="formGrid">
         <label>Reg01h <input data-iml-reg="reg01" value="${hexByte(ls.reg01)}" /></label>
@@ -759,7 +759,7 @@ function ek86752bPanel(ls: Ek86752bConfig): string {
   const hsr = ek52Hsr(ls);
   return `
     <section class="panelSection">
-      <h3>单 EK86752B 参数</h3>
+      <h3>单 EK86752B Hex</h3>
       <div class="callout ok">EK86752B 按 I2C register 独立保存在 project/report，不写 patched XLSX。OCP / Slew / UVLO / MTP 第一版只保存；DUMMY_CLK 暂只提示。</div>
       <div class="ekParamGrid">
         ${ek52RegInput('reg00', 'Reg00h / CK-LC OCP Time', ls.reg00)}
@@ -778,7 +778,7 @@ function ek86752bPanel(ls: Ek86752bConfig): string {
     </section>
     <section class="panelSection">
       <div class="sectionHead">
-        <h3>EK86752B CK / LC 人话参数</h3>
+        <h3>EK86752B CK / LC 调试参数</h3>
         <span class="sectionMeta">${mode}；${ek52PhaseCount(ls)} phase；HSR=${hsr.toString(2).padStart(3, '0')}</span>
       </div>
       <div class="formGrid">
@@ -1172,7 +1172,7 @@ function gpioPanel(): string {
   if (gpos.length === 0) return emptyPanel('导入 XLSX 后显示 GPIO 原生寄存器表。');
   const selected = selectedGpo();
   return `
-    <h2>GPIO Timing 参数页</h2>
+    <h2>GPIO Timing Hex</h2>
     ${gpoSelector(gpos)}
     ${selected ? entryTable(selected) : ''}`;
 }
@@ -1182,7 +1182,7 @@ function combinPanel(): string {
   if (!selected) return emptyPanel('导入 XLSX 后显示 Combin / Mask。');
   const baseline = memoryGpo(selected.index);
   return `
-    <h2>Combin / Mask 参数页</h2>
+    <h2>Combin / Mask Hex</h2>
     ${gpoSelector(state.project.gpos)}
     <div class="formGrid">
       ${compareGpoField('combinType', baseline?.combinType, selected.combinType, selected.soc === 'mt9603' ? 'Logic_function' : 'Combin_Type_SEL', `<input data-gpo-field="combinType" type="number" min="0" max="7" value="${selected.combinType}" />`)}
@@ -1743,7 +1743,7 @@ function addPatch(gpo: GpoConfig, field: 'enabled' | 'level' | 'fcnt' | 'lcnt' |
 
 function markDirty(root: HTMLElement, preserveView = true): void {
   state.project.dirty = true;
-  state.message = '参数已修改，已实时刷新波形';
+  state.message = '调试参数已修改，已实时刷新波形';
   if (state.project.timing) recalc(root, { preserveView, clearTransientCursors: true });
   else render(root);
 }
@@ -1813,6 +1813,7 @@ function defaultViewCenter(kind: ViewMode, signals: SignalTrace[], linePcnt: num
   const lastEdge = (token: string) => signals.filter((signal) => signal.id.includes(token)).flatMap((signal) => signal.edges).at(-1)?.at;
   const tailFallback = Math.max(0, linePcnt * (vtotal - 6));
   if (kind === 'tail') {
+    if (state.project.timing?.soc === 'mt9603' && isLevelShifterClockMode()) return lastEdge('ls:clk1') ?? lastEdge('ls:clk') ?? tailFallback;
     return isLevelShifterClockMode()
       ? lastEdge('ls:clk') ?? tailFallback
       : lastEdge('ck') ?? firstEdge('cpv2') ?? tailFallback;
@@ -1844,6 +1845,7 @@ function applyDefaultReference(kind: ViewMode): void {
   if (state.project.timing?.soc !== 'mt9603') return;
   if (kind === 'debug') setReferenceIfAvailable(['cpv1:merge', 'cpv1:raw']);
   if (kind === 'head') setReferenceIfAvailable(['stv:merge', 'stv:raw', 'ls:stv1']);
+  if (kind === 'tail') setReferenceIfAvailable(['ls:clk1']);
 }
 
 function setReferenceIfAvailable(ids: string[]): void {
