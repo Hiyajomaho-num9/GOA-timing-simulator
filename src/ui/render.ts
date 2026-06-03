@@ -1839,7 +1839,7 @@ function fallbackViewCenter(firstEdge: (token: string) => number | undefined): n
 function defaultCenterCandidates(firstEdge: (token: string) => number | undefined): Array<number | undefined> {
   const model = state.project.levelShifter.model;
   if (model === 'single-iml7272b') return [firstEdge('driver_tp'), firstEdge('init_tp'), findImlInputEdge('clkIn1'), findImlInputEdge('clkIn2'), firstEdge('ls:clk'), firstEdge('ls:stv1'), 0];
-  if (model === 'single-ek86752b') return [firstEdge('cpv1'), firstEdge('ls:clk1'), firstEdge('driver_tp'), firstEdge('ls:stv1'), 0];
+  if (model === 'single-ek86752b') return [firstEdge('driver_tp'), firstEdge('cpv1'), firstEdge('ls:clk1'), firstEdge('ls:stv1'), 0];
   if (model === 'none') return [firstEdge('cpv1'), firstEdge('cpv2'), firstEdge('stv'), 0];
   return [firstEdge('driver_tp'), firstEdge('init_tp'), firstEdge('cpv1'), 0];
 }
@@ -2052,7 +2052,7 @@ function mergeSegments(segments: SignalTrace['segments']): SignalTrace['segments
 function visibleSignalsForMode(): SignalTrace[] {
   const signals = state.project.simulation?.signals ?? [];
   if (signals.length === 0) return [];
-  if (state.viewMode === 'frame120') return addExtraSignals(pinReference(multiFrameSignals(120)));
+  if (state.viewMode === 'frame120') return addExtraSignals(multiFrameSignals(120));
   const collector = createSignalCollector(signals);
   if (state.viewMode === 'debug') return visibleDebugSignals(collector);
   if (state.viewMode === 'head') return visibleHeadSignals(collector);
@@ -2098,7 +2098,7 @@ function createSignalCollector(signals: SignalTrace[]): SignalCollector {
     push,
     pushAll: (ids) => ids.forEach(push),
     pushCks: () => ordered.filter((signal) => isClockOutput(signal.id)).forEach((signal) => push(signal.id)),
-    finish: (fallback = ordered) => addExtraSignals(pinReference(result.length > 0 ? result : fallback)),
+    finish: (fallback = ordered) => addExtraSignals(result.length > 0 ? result : fallback),
   };
   return collector;
 }
@@ -2213,12 +2213,6 @@ function pushMt9603DriverTp(c: SignalCollector): void {
 function pushEk52Outputs(c: SignalCollector): void {
   c.pushAll(['ls:stv1', 'ls:stv2', 'ls:resetout', 'ls:lc1', 'ls:lc2']);
   c.pushCks();
-}
-
-function pinReference(signals: SignalTrace[]): SignalTrace[] {
-  const reference = state.referenceSignalId ? signalById(state.referenceSignalId) : undefined;
-  if (!reference) return signals;
-  return [reference, ...signals.filter((signal) => signal.id !== reference.id)];
 }
 
 function addExtraSignals(signals: SignalTrace[]): SignalTrace[] {
