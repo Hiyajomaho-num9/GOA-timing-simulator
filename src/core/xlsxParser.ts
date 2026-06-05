@@ -203,12 +203,12 @@ function asLevel(value: number): LogicLevel {
 }
 
 function detectSocProfile(workbook: XLSX.WorkBook, fileName: string): SocProfile {
-  if (/9603|9633/i.test(fileName)) return 'mt9603';
+  if (/9603|9633|9618/i.test(fileName)) return 'mt9603';
   const main = workbook.Sheets.Main;
   const version = workbook.Sheets.Version;
   const mainText = main ? JSON.stringify(XLSX.utils.sheet_to_json(main, { header: 1, raw: false, defval: '' })).toLowerCase() : '';
   const versionText = version ? JSON.stringify(XLSX.utils.sheet_to_json(version, { header: 1, raw: false, defval: '' })).toLowerCase() : '';
-  if (/mt9603|mt9633|cmpi|tconless/.test(`${mainText} ${versionText}`)) return 'mt9603';
+  if (/mt9603|mt9633|mt9618|cmpi|tcon[_\s-]*less/.test(`${mainText} ${versionText}`)) return 'mt9603';
   return 'mt9216';
 }
 

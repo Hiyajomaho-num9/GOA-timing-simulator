@@ -29,8 +29,8 @@ const EK_INPUT_RULES: Record<EkInputKey, InputRule> = {
   driverTp: { ids: ['driver_tp:merge', 'driver_tp:raw'], patterns: [/\bdriver\s*tp\b/i, /\btp\s*for\s*driver\b/i] },
   initTp: { ids: ['init_tp:merge', 'init_tp:raw'], patterns: [/\binit\s*tp\b/i, /\bint\s*tp\b/i, /\btp\s*for\s*tcon\b/i] },
   stv: { ids: ['stv:merge', 'stv:raw'], patterns: [/\bstv\b/i] },
-  cpv1: { ids: ['cpv1:merge', 'cpv1:raw'], patterns: [/\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i] },
-  cpv2: { ids: ['cpv2:merge', 'cpv2:raw'], patterns: [/\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i, /\bterminate\b/i, /\bter\b/i] },
+  cpv1: { ids: ['cpv1:merge', 'cpv1:raw'], patterns: [/\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i, /\bclk\s*1\b/i] },
+  cpv2: { ids: ['cpv2:merge', 'cpv2:raw'], patterns: [/\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i, /\bclk\s*2\b/i, /\bterminate\b/i, /\bter\b/i] },
   ter: { ids: ['ter:manual'], patterns: [/\bterminate\b/i, /\bterm\b/i, /\bter\b/i] },
   rst: { ids: ['rst:manual'], patterns: [/\brst\b/i, /\breset\b/i] },
   pol: { ids: ['pol:merge', 'pol:raw'], patterns: [/\bpol\b/i] },
@@ -38,8 +38,8 @@ const EK_INPUT_RULES: Record<EkInputKey, InputRule> = {
 const IML_INPUT_RULES: Record<ImlInputKey, InputRule> = {
   stvIn1: { ids: ['stv:merge', 'stv:raw'], patterns: [/\bstv\s*(out|merge)?\b/i, /\bstv1\b/i] },
   stvIn2: { patterns: [/\bstv\s*in\s*2\b/i, /\bstv[_\s-]*2\b/i, /\bstv2\b/i] },
-  clkIn1: { ids: ['cpv1:merge', 'cpv1:raw'], patterns: [/\bclk\s*in\s*1\b/i, /\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i] },
-  clkIn2: { ids: ['cpv2:merge', 'cpv2:raw'], patterns: [/\bclk\s*in\s*2\b/i, /\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i] },
+  clkIn1: { ids: ['cpv1:merge', 'cpv1:raw'], patterns: [/\bclk\s*in\s*1\b/i, /\bclk\s*1\b/i, /\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i] },
+  clkIn2: { ids: ['cpv2:merge', 'cpv2:raw'], patterns: [/\bclk\s*in\s*2\b/i, /\bclk\s*2\b/i, /\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i] },
   lcIn: { patterns: [/\blc\s*in\b/i, /\bvgpin\b/i, /\blc\b/i] },
   terminate: { patterns: [/\bterminate\b/i, /\bterm\b/i, /\bter\b/i] },
 };
@@ -47,8 +47,8 @@ const EK52_INPUT_RULES: Record<Ek52InputKey, InputRule> = {
   stv1: { ids: ['stv:merge', 'stv:raw'], patterns: [/\bstv\s*1\b/i, /\bstv\b/i] },
   stv2: { patterns: [/\bstv\s*2\b/i, /\bstv[_\s-]*in[_\s-]*2\b/i] },
   reset: { ids: ['rst:manual'], patterns: [/\brst\b/i, /\breset\b/i, /\bresetout\b/i] },
-  cpv1: { ids: ['cpv1:merge', 'cpv1:raw'], patterns: [/\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i, /\bcki\s*1\b/i] },
-  cpv2: { ids: ['cpv2:merge', 'cpv2:raw'], patterns: [/\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i, /\bcki\s*2\b/i] },
+  cpv1: { ids: ['cpv1:merge', 'cpv1:raw'], patterns: [/\bcpv\s*1\b/i, /\bcvp\s*1\b/i, /\bckv\s*1\b/i, /\bcki\s*1\b/i, /\bclk\s*1\b/i] },
+  cpv2: { ids: ['cpv2:merge', 'cpv2:raw'], patterns: [/\bcpv\s*2\b/i, /\bcvp\s*2\b/i, /\bckv\s*2\b/i, /\bcki\s*2\b/i, /\bclk\s*2\b/i] },
   cpv3: { patterns: [/\bcpv\s*3\b/i, /\bcvp\s*3\b/i, /\bckv\s*3\b/i, /\bcki\s*3\b/i] },
   cpv4: { patterns: [/\bcpv\s*4\b/i, /\bcvp\s*4\b/i, /\bckv\s*4\b/i, /\bcki\s*4\b/i] },
   terminate: { patterns: [/\bterminate\b/i, /\bterm\b/i, /\bter\b/i] },
@@ -118,7 +118,7 @@ function layout(): string {
       </header>
       <section class="commandBar">
         <label class="file-picker">导入 XLSX<input id="fileInput" type="file" accept=".xlsx,.xlsm,.xls" /></label>
-        <label>SoC Profile <select id="socProfile"><option value="auto">Auto</option><option value="mt9216">MT9216</option><option value="mt9603">MT9603 / MT9633</option></select></label>
+        <label>SoC Profile <select id="socProfile"><option value="auto">Auto</option><option value="mt9216">MT9216</option><option value="mt9603">MT9603 / MT9633 / MT9618</option></select></label>
         <label>Htotal <input id="htotalInput" type="number" min="1" step="1" placeholder="-" /></label>
         <label>Vtotal <input id="vtotalInput" type="number" min="1" step="1" placeholder="-" /></label>
         <label>Frame Rate <input id="frameRate" type="number" min="1" step="0.01" value="60" /></label>

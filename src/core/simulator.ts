@@ -394,7 +394,7 @@ function detectFamilies(gpos: GpoConfig[]): SignalFamily[] {
   const byPredicate = (predicate: (g: GpoConfig, text: string) => boolean) => gpos.find((g) => predicate(g, textOf(g)));
   const hasToken = (text: string, token: string) => new RegExp(`(^|\\s)${token}(\\s|$)`, 'i').test(text);
   const isInitTpText = (text: string) => /(int|init|tcon)/i.test(text);
-  const isCpvText = (text: string) => /(cpv1|cpv2|cvp1|cvp2)/i.test(text);
+  const isCpvText = (text: string) => /(cpv1|cpv2|cvp1|cvp2|\bclk\s*1\b|\bclk\s*2\b)/i.test(text);
   const driverRaw =
     byText([/tp\s*for\s*driver/i, /driver\s*tp(?!.*merge)/i]) ??
     byPredicate((_g, text) => hasToken(text, 'tp') && !/merge|stv|pol|rst/i.test(text) && !isInitTpText(text) && !isCpvText(text));
@@ -414,8 +414,8 @@ function detectFamilies(gpos: GpoConfig[]): SignalFamily[] {
     make('driver_tp', 'Driver_TP', driverRaw, driverSource),
     make('init_tp', 'Init_TP', byText([/int\s*tp\s*for\s*tcon/i, /init\s*tp(?!.*merge)/i, /int\s*tp(?!.*merge)/i]), byText([/int\s*tp.*merge/i, /init\s*tp.*merge/i])),
     make('stv', 'STV', byText([/stv/i])),
-    make('cpv1', 'CPV1', byText([/cpv1(?!.*merge)/i]), byText([/cpv1.*merge/i])),
-    make('cpv2', 'CPV2', byText([/cpv2(?!.*merge)/i]), byText([/(cpv2|cvp2).*merge/i])),
+    make('cpv1', 'CPV1', byText([/(cpv1|cvp1|\bclk\s*1\b)(?!.*merge)/i]), byText([/(cpv1|cvp1|\bclk\s*1\b).*merge/i])),
+    make('cpv2', 'CPV2', byText([/(cpv2|cvp2|\bclk\s*2\b)(?!.*merge)/i]), byText([/(cpv2|cvp2|\bclk\s*2\b).*merge/i])),
     make('pol', 'POL', byText([/int\s*pol\b/i, /\bpol\b/i])),
     make('lc', 'LC', byText([/(^|\s)lc(\s|$)/i, /vgpin/i])),
   ];
