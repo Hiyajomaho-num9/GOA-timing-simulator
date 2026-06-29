@@ -1892,10 +1892,7 @@ function defaultViewCenter(kind: ViewMode, signals: SignalTrace[], linePcnt: num
   const lastEdgeExact = (id: string) => lastItem(signals.find((signal) => signal.id === id)?.edges ?? [])?.at;
   const tailFallback = Math.max(0, linePcnt * (vtotal - 6));
   if (kind === 'tail') {
-    if (state.project.timing?.soc === 'mt9603' && isLevelShifterClockMode()) return lastEdgeExact('ls:clk1') ?? lastEdge('ls:clk') ?? tailFallback;
-    return isLevelShifterClockMode()
-      ? lastEdge('ls:clk') ?? tailFallback
-      : lastEdge('ck') ?? firstEdge('cpv2') ?? tailFallback;
+    return lastEdgeExact('ls:clk1') ?? lastEdgeExact('ck1') ?? lastEdge('ls:clk') ?? lastEdge('ck') ?? tailFallback;
   }
   if (kind === 'head') return headViewCenter(firstEdge, fallbackViewCenter(firstEdge));
   return fallbackViewCenter(firstEdge);
@@ -1921,17 +1918,26 @@ function defaultCenterCandidates(firstEdge: (token: string) => number | undefine
 }
 
 function applyDefaultReference(kind: ViewMode): void {
+  if (kind === 'tail') {
+    if (!setReferenceIfAvailable(['ls:clk1', 'ck1'], 'last')) clearReference();
+    return;
+  }
   if (state.project.timing?.soc !== 'mt9603') return;
   if (kind === 'debug') setReferenceIfAvailable(['cpv1:merge', 'cpv1:raw']);
   if (kind === 'head') setReferenceIfAvailable(['stv:merge', 'stv:raw', 'ls:stv1']);
-  if (kind === 'tail') setReferenceIfAvailable(['ls:clk1'], 'last');
 }
 
-function setReferenceIfAvailable(ids: string[], edgePick: 'first' | 'last' = 'first'): void {
-  const signal = ids.map((id) => signalById(id)).find((item): item is SignalTrace => Boolean(item));
-  if (!signal) return;
+function setReferenceIfAvailable(ids: string[], edgePick: 'first' | 'last' = 'first'): boolean {
+  const signal = ids.map((id) => signalById(id)).find((item): item is SignalTrace => Boolean(item && item.edges.length > 0));
+  if (!signal) return false;
   state.referenceSignalId = signal.id;
   state.referenceEdgeId = edgePick === 'last' ? lastItem(signal.edges)?.id : signal.edges[0]?.id;
+  return true;
+}
+
+function clearReference(): void {
+  state.referenceSignalId = undefined;
+  state.referenceEdgeId = undefined;
 }
 
 function firstDefined(values: Array<number | undefined>): number {
@@ -2232,6 +2238,7 @@ function visibleHeadSignals(c: SignalCollector): SignalTrace[] {
 function visibleTailSignals(c: SignalCollector): SignalTrace[] {
   const ls = state.project.levelShifter;
   if (ls.model === 'none') {
+    c.pushCks();
     c.pushAll(['cpv1:merge', 'cpv2:merge', 'lc:merge', 'pol:merge', 'rst:manual']);
     return c.finish();
   }
