@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -51,16 +51,13 @@ try {
     { cwd: root, stdio: 'pipe' },
   );
 
-  const XLSXModule = await import('xlsx');
-  const XLSX = XLSXModule.default ?? XLSXModule;
   const types = await import(pathToFileURL(path.join(outDir, 'core/types.js')).href);
   const parser = await import(pathToFileURL(path.join(outDir, 'core/xlsxParser.js')).href);
   const simulator = await import(pathToFileURL(path.join(outDir, 'core/simulator.js')).href);
 
-  const workbook = XLSX.readFile(workbookPath, { cellDates: false });
-  const timing = parser.parseTiming(workbook, frameRate);
-  const gpioRows = parser.parseRows(workbook, 'GPIO', 10);
-  const gpos = parser.buildGpos(gpioRows);
+  const parsed = parser.parseXlsxBuffer(readFileSync(workbookPath), path.basename(workbookPath), frameRate);
+  const timing = parsed.timing;
+  const gpos = parsed.gpos;
   const project = {
     timing,
     gpos,

@@ -1,9 +1,11 @@
-import { strFromU8, strToU8, unzipSync, zipSync, type Unzipped } from 'fflate';
 import { defaultDualEk86707aConfig, defaultEk86752bConfig, defaultIml7272bConfig, defaultLevelShifterConfig, defaultNoLevelShifterConfig, defaultTpGeneratorConfig, ek86707aSet1OutputCount, type DraftProject, type DualEk86707aConfig, type Edge, type Ek86707aConfig, type Ek86707aInputs, type Ek86752bConfig, type Ek86752bInputs, type EkSet1Level, type GpoConfig, type Iml7272bConfig, type LevelShifterConfig, type SignalTrace, type SocProfile, type TpGeneratorConfig } from '../core/types';
 import { parseXlsxBuffer, type SocProfileSelection } from '../core/xlsxParser';
-import { simulateGpoOutWindow, simulateGpoWindow, simulateProject } from '../core/simulator';
+import { simulateProject } from '../core/simulator';
 import { formatCount4, formatDuration, formatPcnt, makeTimingBase } from '../core/time';
+import { createWaveformWorkerClient, type WaveformWorkerClient } from '../core/waveformWorkerClient';
+import type { DrawableSegment, QueryMode, SignalSummary } from '../core/waveformEngine';
 import { drawWaveform, type WaveformHitMap, type WaveformView } from './waveformCanvas';
+import { patchXlsxZip } from './xlsxPatch';
 
 type ViewMode = 'debug' | 'head' | 'tail' | 'frame1' | 'frame120';
 type SocProfileChoice = SocProfileSelection;
@@ -24,6 +26,7 @@ const EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2'
 const DUAL_EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2', 'ter', 'rst', 'pol'];
 const IML_INPUT_KEYS: ImlInputKey[] = ['stvIn1', 'stvIn2', 'clkIn1', 'clkIn2', 'lcIn', 'terminate'];
 const EK52_INPUT_KEYS: Ek52InputKey[] = ['stv1', 'stv2', 'reset', 'cpv1', 'cpv2', 'cpv3', 'cpv4', 'terminate', 'lcIn1', 'lcIn2'];
+const COMBIN_TYPE_LABELS = ['0: ORG', '1: AND', '2: OR', '3: XOR', '4: NOT', '5: Hi', '6: Low', '7: NA'];
 type InputRule = { ids?: string[]; patterns?: RegExp[] };
 const EK_INPUT_RULES: Record<EkInputKey, InputRule> = {
   driverTp: { ids: ['driver_tp:merge', 'driver_tp:raw'], patterns: [/\bdriver\s*tp\b/i, /\btp\s*for\s*driver\b/i] },
@@ -84,6 +87,14 @@ const state: {
   manualEk52InputKeys: Set<Ek52InputKey>;
   compareEnabled: boolean;
   memoryGpos?: GpoConfig[];
+  waveformWorker?: WaveformWorkerClient;
+  waveformWorkerInit?: Promise<void>;
+  waveformWorkerFailed: boolean;
+  waveformVersion: number;
+  waveformCache?: { key: string; signals: SignalTrace[] };
+  waveformPendingKey?: string;
+  waveformNearest?: { key: string; edge?: Edge };
+  waveformNearestPendingKey?: string;
 } = {
   project: { gpos: [], levelShifter: defaultLevelShifterConfig(), tpGenerator: defaultTpGeneratorConfig(), measurements: [], patches: [], dirty: false },
   socProfileChoice: 'auto',
@@ -99,6 +110,8 @@ const state: {
   manualImlInputKeys: new Set<ImlInputKey>(),
   manualEk52InputKeys: new Set<Ek52InputKey>(),
   compareEnabled: false,
+  waveformWorkerFailed: false,
+  waveformVersion: 0,
 };
 
 export function mountApp(root: HTMLElement): void {
@@ -301,7 +314,7 @@ function bindStaticEvents(root: HTMLElement): void {
   }, { passive: false });
   canvas?.addEventListener('mousedown', (event) => {
     if (!state.view) return;
-    const edge = state.snapEnabled ? nearestEdge(event.offsetX, event.offsetY, state.snapRadius) : undefined;
+    const edge = state.snapEnabled ? nearestEdge(root, event.offsetX, event.offsetY, state.snapRadius) : undefined;
     const target = edge ? draggableEdgeTarget(edge) : undefined;
     state.drag = edge && target
       ? { mode: 'edge', x: event.clientX, edge, target, originAt: edge.at, previewAt: edge.at }
@@ -329,7 +342,7 @@ function bindStaticEvents(root: HTMLElement): void {
   });
   canvas?.addEventListener('mousemove', (event) => {
     if (state.drag) return;
-    const edge = state.snapEnabled ? nearestEdge(event.offsetX, event.offsetY, state.snapRadius) : undefined;
+    const edge = state.snapEnabled ? nearestEdge(root, event.offsetX, event.offsetY, state.snapRadius) : undefined;
     const point = state.snapEnabled ? undefined : previewPointAt(event.offsetX, event.offsetY);
     if (state.hoverEdge?.id === edge?.id && state.cursorPoint?.at === point?.at && state.cursorPoint?.signalId === point?.signalId) return;
     state.hoverEdge = edge;
@@ -348,7 +361,7 @@ function bindStaticEvents(root: HTMLElement): void {
       state.dragMoved = false;
       return;
     }
-    const edge = state.snapEnabled ? nearestEdge(event.offsetX, event.offsetY, state.snapRadius) : pointAt(event.offsetX, event.offsetY);
+    const edge = state.snapEnabled ? nearestEdge(root, event.offsetX, event.offsetY, state.snapRadius) : pointAt(event.offsetX, event.offsetY);
     if (!edge) return;
     if (!state.selectedStartEdge || (state.selectedStartEdge && state.selectedEndEdge)) {
       state.selectedStartEdge = edge.id;
@@ -1248,9 +1261,10 @@ function combinPanel(): string {
     <h2>Combin / Mask Hex</h2>
     ${gpoSelector(state.project.gpos)}
     <div class="formGrid">
-      ${compareGpoField('combinType', baseline?.combinType, selected.combinType, selected.soc === 'mt9603' ? 'Logic_function' : 'Combin_Type_SEL', `<input data-gpo-field="combinType" type="number" min="0" max="7" value="${selected.combinType}" />`)}
+      ${compareGpoField('combinType', baseline?.combinType, selected.combinType, selected.soc === 'mt9603' ? 'Logic_function' : 'Combin_Type_SEL', combinTypeSelect(selected.combinType), formatCombinType)}
       ${compareGpoField('combinSel', baseline?.combinSel, selected.combinSel, 'GPO_Combin_SEL', `<input data-gpo-field="combinSel" type="number" min="0" max="23" value="${selected.combinSel}" />`)}
       ${compareGpoField('repeatMode', baseline?.repeatMode, selected.repeatMode, 'Repeat_mode_SEL', `<input data-gpo-field="repeatMode" type="number" min="0" max="1" value="${selected.repeatMode}" />`)}
+      ${compareGpoField('repeatCount', baseline?.repeatCount, selected.repeatCount, 'Repeat_Count_num', countInput('data-gpo-field="repeatCount"', selected.repeatCount), formatCount4)}
       ${compareGpoField('maskEnabled', baseline?.maskEnabled, selected.maskEnabled, 'Mask_region_EN', `<label class="check embeddedCheck"><input data-gpo-field="maskEnabled" type="checkbox" ${selected.maskEnabled ? 'checked' : ''}/> enabled</label>`, formatBool)}
       ${compareGpoField('regionVst', baseline?.regionVst, selected.regionVst, 'Region_VST', countInput('data-gpo-field="regionVst"', selected.regionVst), formatCount4)}
       ${compareGpoField('regionVend', baseline?.regionVend, selected.regionVend, 'Region_VEND', countInput('data-gpo-field="regionVend"', selected.regionVend), formatCount4)}
@@ -1262,6 +1276,14 @@ function combinPanel(): string {
 
 function compareGpoField<T>(field: string, oldValue: T | undefined, newValue: T, label: string, control: string, format: (value: T) => string = String): string {
   return `<label class="${compareClass(oldValue, newValue)}" data-compare-field="${htmlAttr(field)}">${label}${control}${compareHint(oldValue, newValue, format)}</label>`;
+}
+
+function combinTypeSelect(value: number): string {
+  return `<select data-gpo-field="combinType">${COMBIN_TYPE_LABELS.map((label, index) => `<option value="${index}" ${value === index ? 'selected' : ''}>${label}</option>`).join('')}</select>`;
+}
+
+function formatCombinType(value: number): string {
+  return COMBIN_TYPE_LABELS[value] ?? String(value);
 }
 
 function measurementPanel(): string {
@@ -1473,7 +1495,7 @@ function bindPanelEvents(root: HTMLElement): void {
     render(root);
   });
   root.querySelectorAll<HTMLInputElement>('[data-entry]').forEach((input) => input.addEventListener('change', () => updateEntry(root, input)));
-  root.querySelectorAll<HTMLInputElement>('[data-gpo-field]').forEach((input) => input.addEventListener('change', () => updateGpoField(root, input)));
+  root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-gpo-field]').forEach((input) => input.addEventListener('change', () => updateGpoField(root, input)));
   root.querySelector<HTMLSelectElement>('#startEdge')?.addEventListener('change', (event) => { state.selectedStartEdge = (event.currentTarget as HTMLSelectElement).value; });
   root.querySelector<HTMLSelectElement>('#endEdge')?.addEventListener('change', (event) => { state.selectedEndEdge = (event.currentTarget as HTMLSelectElement).value; });
   root.querySelectorAll<HTMLInputElement>('[data-measure-field]').forEach((input) => input.addEventListener('change', () => updateMeasurementField(root, input)));
@@ -1784,16 +1806,22 @@ function edgePatchPath(target: DraggableEdgeTarget): string {
   return `GPIO > ${target.gpo.group} > entry${entry.index} > LCNT ${lcntCell} / PCNT ${pcntCell}`;
 }
 
-function updateGpoField(root: HTMLElement, input: HTMLInputElement): void {
+function updateGpoField(root: HTMLElement, input: HTMLInputElement | HTMLSelectElement): void {
   const gpo = selectedGpo();
   if (!gpo) return;
   const key = input.dataset.gpoField as keyof GpoConfig;
   const oldValue = gpo[key] as unknown;
-  const next = input.type === 'checkbox' ? input.checked : Number(input.value);
+  const next = input instanceof HTMLInputElement && input.type === 'checkbox' ? input.checked : Number(input.value);
   (gpo as unknown as Record<string, unknown>)[key] = next;
   const cellName = gpoFieldCellName(gpo, String(key));
-  state.project.patches.push({ sheet: 'GPIO', cell: gpo.cells[cellName]?.address ?? '-', group: gpo.group, name: cellName, oldValue: oldValue as string | number | null, newValue: next as string | number | null });
+  state.project.patches.push({ sheet: 'GPIO', cell: gpo.cells[cellName]?.address ?? '-', group: gpo.group, name: cellName, oldValue: patchCellValue(oldValue), newValue: patchCellValue(next) });
   markDirty(root);
+}
+
+function patchCellValue(value: unknown): string | number | null {
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (typeof value === 'number' || typeof value === 'string' || value === null) return value;
+  return null;
 }
 
 function gpoFieldCellName(gpo: GpoConfig, key: string): string {
@@ -1801,6 +1829,7 @@ function gpoFieldCellName(gpo: GpoConfig, key: string): string {
     combinType: gpo.soc === 'mt9603' ? 'Logic_function' : 'Combin_Type_SEL',
     combinSel: 'GPO_Combin_SEL',
     repeatMode: 'Repeat_mode_SEL',
+    repeatCount: 'Repeat_Count_num',
     maskEnabled: 'Mask_region_EN',
     regionVst: 'Region_VST',
     regionVend: 'Region_VEND',
@@ -1840,6 +1869,7 @@ function recalc(root: HTMLElement, options: { preserveView?: boolean; clearTrans
     refreshMeasurementSnapshots();
     state.project.dirty = state.project.patches.length > 0;
     state.message = options.successMessage ?? (autoMapped.length > 0 ? `波形已重新计算，自动识别：${autoMapped.join('，')}` : '波形已重新计算');
+    resetWaveformWorker(root);
     if (!options.preserveView) {
       setDefaultView(state.viewMode);
     }
@@ -1847,6 +1877,58 @@ function recalc(root: HTMLElement, options: { preserveView?: boolean; clearTrans
     state.message = error instanceof Error ? error.message : String(error);
   }
   render(root);
+}
+
+function resetWaveformWorker(root: HTMLElement): void {
+  state.waveformVersion += 1;
+  state.waveformCache = undefined;
+  state.waveformPendingKey = undefined;
+  state.waveformNearest = undefined;
+  state.waveformNearestPendingKey = undefined;
+  state.waveformWorkerFailed = false;
+  state.waveformWorker?.dispose();
+  state.waveformWorker = undefined;
+  state.waveformWorkerInit = undefined;
+  void ensureWaveformWorker(root);
+}
+
+function ensureWaveformWorker(root: HTMLElement): Promise<void> | undefined {
+  if (!state.project.timing || state.waveformWorkerFailed) return undefined;
+  if (state.waveformWorkerInit) return state.waveformWorkerInit;
+  try {
+    const worker = createWaveformWorkerClient();
+    const version = state.waveformVersion;
+    state.waveformWorker = worker;
+    state.waveformWorkerInit = worker.init(waveformWorkerProject()).then(() => {
+      if (version === state.waveformVersion) draw(root);
+    }).catch((error) => {
+      if (version !== state.waveformVersion) return;
+      state.waveformWorkerFailed = true;
+      state.waveformWorker = undefined;
+      state.waveformWorkerInit = undefined;
+      state.message = `Worker 初始化失败：${error instanceof Error ? error.message : String(error)}`;
+      render(root);
+    });
+    return state.waveformWorkerInit;
+  } catch (error) {
+    state.waveformWorkerFailed = true;
+    state.message = `Worker 初始化失败：${error instanceof Error ? error.message : String(error)}`;
+    return undefined;
+  }
+}
+
+function waveformWorkerProject(): DraftProject {
+  return {
+    timing: state.project.timing,
+    gpos: structuredCloneGpos(state.project.gpos),
+    levelShifter: structuredClone(state.project.levelShifter),
+    tpGenerator: state.project.tpGenerator ? structuredClone(state.project.tpGenerator) : undefined,
+    rstGpo: state.project.rstGpo,
+    manualEdges: state.project.manualEdges ? structuredClone(state.project.manualEdges) : undefined,
+    measurements: structuredClone(state.project.measurements),
+    patches: [],
+    dirty: state.project.dirty,
+  };
 }
 
 function refreshMeasurementSnapshots(): void {
@@ -2027,7 +2109,7 @@ function draggableEdgeTarget(edge: Edge | undefined): DraggableEdgeTarget | unde
   return { gpo, entry: best.entry, periodStart };
 }
 
-function nearestEdge(x: number, y: number, radius = 8): Edge | undefined {
+function nearestEdge(root: HTMLElement, x: number, y: number, radius = 8): Edge | undefined {
   const hit = state.hitMap;
   if (!hit) return undefined;
   let best: { edge: Edge; dist: number } | undefined;
@@ -2038,7 +2120,39 @@ function nearestEdge(x: number, y: number, radius = 8): Edge | undefined {
     const dist = Math.hypot(dx, verticalGap);
     if (dist <= radius && (!best || dist < best.dist)) best = { edge, dist };
   }
-  return best?.edge;
+  return best?.edge ?? workerNearestEdge(root, x, y, radius);
+}
+
+function workerNearestEdge(root: HTMLElement, x: number, y: number, radius: number): Edge | undefined {
+  const hit = state.hitMap;
+  const worker = state.waveformWorker;
+  if (state.viewMode !== 'frame120' || !hit || !worker || x < hit.plotLeft || x > hit.plotLeft + hit.plotWidth) return undefined;
+  const row = hit.rows.find((item) => y >= item.y1 && y <= item.y2);
+  if (!row) return undefined;
+  const span = hit.view.end - hit.view.start;
+  if (state.hoverEdge?.signalId === row.signal.id) {
+    const edgeX = hit.plotLeft + ((state.hoverEdge.at - hit.view.start) / span) * hit.plotWidth;
+    if (Math.abs(edgeX - x) <= radius) return state.hoverEdge;
+  }
+  const at = Math.round(hit.view.start + ((x - hit.plotLeft) / hit.plotWidth) * span);
+  const radiusPcnt = Math.max(1, Math.round((radius / hit.plotWidth) * span));
+  const key = [state.waveformVersion, row.signal.id, at, radiusPcnt].join('|');
+  if (state.waveformNearest?.key === key) return state.waveformNearest.edge;
+  if (state.waveformNearestPendingKey !== key) {
+    state.waveformNearestPendingKey = key;
+    const version = state.waveformVersion;
+    worker.nearestEdge({ signalId: row.signal.id, at, radiusPcnt }).then((edge) => {
+      if (version !== state.waveformVersion || state.waveformNearestPendingKey !== key) return;
+      state.waveformNearest = { key, edge };
+      state.waveformNearestPendingKey = undefined;
+      state.hoverEdge = edge;
+      renderEdgeCursor(root);
+      draw(root);
+    }).catch(() => {
+      if (state.waveformNearestPendingKey === key) state.waveformNearestPendingKey = undefined;
+    });
+  }
+  return undefined;
 }
 
 function previewPointAt(x: number, y: number): Edge | undefined {
@@ -2084,6 +2198,8 @@ function renderWarnings(root: HTMLElement): void {
 function draw(root: HTMLElement): void {
   const canvas = root.querySelector<HTMLCanvasElement>('#waveCanvas');
   if (!canvas) return;
+  const pixelWidth = Math.max(1, Math.floor(canvas.getBoundingClientRect().width || 1));
+  if (state.viewMode === 'frame120') requestFrame120Signals(root, pixelWidth);
   state.hitMap = drawWaveform(canvas, visibleSignalsForMode(), state.project.timing, state.view, {
     hoverEdgeId: state.hoverEdge?.id,
     cursorAt: state.snapEnabled ? undefined : state.cursorPoint?.at,
@@ -2098,48 +2214,10 @@ function draw(root: HTMLElement): void {
   canvas.classList.toggle('snap-off', !state.snapEnabled);
 }
 
-function overviewSignal(signal: SignalTrace, maxSegments = 3000): SignalTrace {
-  if (!state.project.timing || signal.segments.length <= maxSegments) return signal;
-  const total = viewTotalPcnt();
-  const bin = Math.max(1, Math.ceil(total / maxSegments));
-  const reduced: SignalTrace['segments'] = [];
-  let cursor = 0;
-  let index = 0;
-  while (cursor < total) {
-    const end = Math.min(total, cursor + bin);
-    let active = false;
-    while (index < signal.segments.length && signal.segments[index].end <= cursor) index += 1;
-    for (let j = index; j < signal.segments.length && signal.segments[j].start < end; j += 1) {
-      if (signal.segments[j].level === 1 && signal.segments[j].end > cursor) {
-        active = true;
-        break;
-      }
-    }
-    reduced.push({ start: cursor, end, level: active ? 1 : 0, source: `${signal.sourceGpo ?? signal.id}:overview` });
-    cursor = end;
-  }
-  return {
-    ...signal,
-    segments: mergeSegments(reduced),
-    edges: [],
-    note: '120frame overview 降载显示；放大或切到 1frame 可看精确边沿',
-  };
-}
-
-function mergeSegments(segments: SignalTrace['segments']): SignalTrace['segments'] {
-  const merged: SignalTrace['segments'] = [];
-  for (const segment of segments) {
-    const prev = merged[merged.length - 1];
-    if (prev && prev.end === segment.start && prev.level === segment.level && prev.source === segment.source) prev.end = segment.end;
-    else merged.push({ ...segment });
-  }
-  return merged;
-}
-
 function visibleSignalsForMode(): SignalTrace[] {
   const signals = state.project.simulation?.signals ?? [];
   if (signals.length === 0) return [];
-  if (state.viewMode === 'frame120') return addExtraSignals(multiFrameSignals(120));
+  if (state.viewMode === 'frame120') return state.waveformCache?.signals ?? frame120SignalIds().map(frame120LoadingSignal).filter((signal): signal is SignalTrace => Boolean(signal));
   const collector = createSignalCollector(signals);
   if (state.viewMode === 'debug') return visibleDebugSignals(collector);
   if (state.viewMode === 'head') return visibleHeadSignals(collector);
@@ -2305,52 +2383,90 @@ function pushEk52Outputs(c: SignalCollector): void {
 
 function addExtraSignals(signals: SignalTrace[]): SignalTrace[] {
   const extras = state.extraSignalIds
-    .map((id) => state.viewMode === 'frame120' ? overviewSignalOrBase(multiFrameSignalById(id, 120)) : signalById(id))
+    .map((id) => signalById(id))
     .filter((signal): signal is SignalTrace => Boolean(signal));
   return [...signals, ...extras.filter((signal) => !signals.some((item) => item.id === signal.id))];
 }
 
-function overviewSignalOrBase(signal: SignalTrace | undefined): SignalTrace | undefined {
-  return signal ? overviewSignal(signal) : undefined;
-}
-
-function multiFrameSignals(frames: number): SignalTrace[] {
-  const baseIds = ['stv:merge', 'pol:merge'];
-  const signals = baseIds
-    .map((id) => overviewSignalOrBase(multiFrameSignalById(id, frames)))
-    .filter((signal): signal is SignalTrace => Boolean(signal));
-  const lcSignals = state.project.gpos
+function frame120SignalIds(): string[] {
+  const ids = ['stv:merge', 'pol:merge'];
+  state.project.gpos
     .filter((gpo) => /(^|[_\s-])(lc|vgpin)/i.test(gpo.group))
-    .map((gpo) => overviewSignalOrBase(multiFrameSignalById(`gpo:${gpo.index}:merge`, frames)))
-    .filter((signal): signal is SignalTrace => Boolean(signal));
-  return [...signals, ...lcSignals.filter((signal) => !signals.some((item) => item.id === signal.id))];
+    .forEach((gpo) => ids.push(`gpo:${gpo.index}:merge`));
+  ids.push(...state.extraSignalIds);
+  return ids.filter((id, index) => Boolean(signalById(id)) && ids.indexOf(id) === index);
 }
 
-function multiFrameSignalById(id: string, frames: number): SignalTrace | undefined {
+function frame120LoadingSignal(id: string): SignalTrace | undefined {
   const base = signalById(id);
-  const timing = state.project.timing;
-  if (!base || !timing) return undefined;
-  const gpoIndex = base.sourceGpo;
-  if (gpoIndex === undefined || base.kind === 'ck') return base;
-  const gpo = state.project.gpos.find((item) => item.index === gpoIndex);
-  if (!gpo) return base;
-  const own = id.endsWith(':raw')
-    ? simulateGpoWindow(gpo, timing, false, frames)
-    : simulateGpoOutWindow(gpo, state.project.gpos, timing, false, frames);
-  const signal: SignalTrace = {
-    ...base,
-    segments: own,
-    edges: edgesForSignal(base, own),
-    summary: pulseSummary(own, timing, gpo),
-  };
-  return signal;
+  return base ? { ...base, segments: [], edges: [], summary: state.waveformWorkerFailed ? 'Worker failed' : 'loading…' } : undefined;
 }
 
-function edgesForSignal(base: SignalTrace, segments: SignalTrace['segments']): Edge[] {
+function requestFrame120Signals(root: HTMLElement, pixelWidth: number): void {
+  const view = state.view;
+  const t = state.project.timing;
+  const worker = state.waveformWorker;
+  if (!view || !t || !worker) {
+    void ensureWaveformWorker(root);
+    return;
+  }
+  const signalIds = frame120SignalIds();
+  const frameTotal = t.pcntPerLine * t.vtotal;
+  const mode: QueryMode = view.end - view.start <= frameTotal ? 'exact' : 'overview';
+  const key = [state.waveformVersion, view.start, view.end, pixelWidth, mode, signalIds.join(',')].join('|');
+  if (state.waveformCache?.key === key || state.waveformPendingKey === key) return;
+  state.waveformPendingKey = key;
+  const version = state.waveformVersion;
+  const summaries = Promise.all(signalIds.map((id) => worker.summarizeSignal(id, view.start, view.end).catch(() => undefined)));
+  Promise.all([
+    worker.querySignals({ signalIds, startPcnt: view.start, endPcnt: view.end, pixelWidth, mode }),
+    summaries,
+  ]).then(([segments, summaryList]) => {
+    if (version !== state.waveformVersion || state.waveformPendingKey !== key) return;
+    state.waveformCache = { key, signals: frame120SignalsFromQuery(signalIds, segments, summaryList, view.start, mode) };
+    state.waveformPendingKey = undefined;
+    draw(root);
+  }).catch((error) => {
+    if (version !== state.waveformVersion) return;
+    state.waveformPendingKey = undefined;
+    state.message = `Worker 查询失败：${error instanceof Error ? error.message : String(error)}`;
+    render(root);
+  });
+}
+
+function frame120SignalsFromQuery(ids: string[], segments: DrawableSegment[], summaries: Array<SignalSummary | undefined>, windowStart: number, mode: QueryMode): SignalTrace[] {
+  const result: SignalTrace[] = [];
+  ids.forEach((id, index) => {
+    const base = signalById(id);
+    if (!base) return;
+    const own: SignalTrace['segments'] = segments
+      .filter((segment) => segment.signalId === id)
+      .map((segment) => ({ start: segment.start, end: segment.end, level: segment.level, source: mode === 'overview' ? 'worker:overview' : 'worker:exact' }));
+    result.push({
+      ...base,
+      segments: own,
+      edges: mode === 'exact' ? edgesForSignal(base, own, windowStart) : [],
+      summary: summaryText(summaries[index]),
+      note: mode === 'overview' ? '120frame worker overview；放大后切 exact' : '120frame worker exact',
+    });
+  });
+  return result;
+}
+
+function summaryText(summary: SignalSummary | undefined): string {
+  if (!summary || summary.pulseCount === 0) return 'W=0';
+  return `W=${formatDuration(summary.firstWidthSeconds)}${summary.periodSeconds ? ` T=${formatDuration(summary.periodSeconds)}` : ''}`;
+}
+
+function edgesForSignal(base: SignalTrace, segments: SignalTrace['segments'], windowStart = 0): Edge[] {
   const edges: Edge[] = [];
-  let prevLevel: 0 | 1 = 0;
+  let prevLevel: 0 | 1 = segments.find((segment) => segment.start <= windowStart && segment.end > windowStart)?.level ?? 0;
   for (const segment of segments) {
-    if (segment.start > 0 && segment.level !== prevLevel) {
+    if (segment.end <= windowStart) {
+      prevLevel = segment.level;
+      continue;
+    }
+    if (segment.start > windowStart && segment.level !== prevLevel) {
       edges.push({
         id: `${base.id}@${segment.start}:${segment.level}`,
         signalId: base.id,
@@ -2579,109 +2695,6 @@ function exportPatchedXlsx(root: HTMLElement): void {
   }
 }
 
-function patchXlsxZip(source: ArrayBuffer, patches: DraftProject['patches']): Uint8Array {
-  const zip = unzipSync(new Uint8Array(source));
-  const sheetPaths = sheetXmlPaths(zip);
-  const grouped = new Map<string, DraftProject['patches']>();
-  for (const patch of patches) {
-    if (patch.cell === '-') continue;
-    const list = grouped.get(patch.sheet) ?? [];
-    list.push(patch);
-    grouped.set(patch.sheet, list);
-  }
-  for (const [sheetName, sheetPatches] of grouped) {
-    const path = sheetPaths.get(sheetName);
-    if (!path) throw new Error(`找不到 sheet XML：${sheetName}`);
-    const current = zip[path];
-    if (!current) throw new Error(`XLSX 内缺少 ${path}`);
-    let xml = strFromU8(current);
-    for (const patch of sheetPatches) {
-      xml = patchSheetCellXml(xml, patch.cell, patch.newValue);
-    }
-    zip[path] = strToU8(xml);
-  }
-  return zipSync(zip);
-}
-
-function sheetXmlPaths(zip: Unzipped): Map<string, string> {
-  const workbookXml = zip['xl/workbook.xml'];
-  const relsXml = zip['xl/_rels/workbook.xml.rels'];
-  if (!workbookXml || !relsXml) throw new Error('XLSX 缺少 workbook.xml 或 workbook.xml.rels。');
-  const workbook = strFromU8(workbookXml);
-  const rels = strFromU8(relsXml);
-  const ridToTarget = new Map<string, string>();
-  for (const rel of allMatches(rels, /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bTarget="([^"]+)"[^>]*>/g)) {
-    ridToTarget.set(xmlDecode(rel[1]), xmlDecode(rel[2]));
-  }
-  const result = new Map<string, string>();
-  for (const sheet of allMatches(workbook, /<sheet\b[^>]*\bname="([^"]+)"[^>]*\br:id="([^"]+)"[^>]*\/?>/g)) {
-    const name = xmlDecode(sheet[1]);
-    const rid = xmlDecode(sheet[2]);
-    const target = ridToTarget.get(rid);
-    if (!target) continue;
-    const normalized = target.startsWith('/') ? target.slice(1) : `xl/${target.replace(/^\.\//, '')}`;
-    result.set(name, normalized.replace(/\/+/g, '/'));
-  }
-  return result;
-}
-
-function patchSheetCellXml(xml: string, cell: string, value: string | number | null): string {
-  const escapedCell = escapeRegExp(cell);
-  const cellRe = new RegExp(`<c\\b[^>]*\\br="${escapedCell}"[^>]*(?:\\/>|>[\\s\\S]*?<\\/c>)`);
-  const match = xml.match(cellRe);
-  const cellXml = makeCellXml(cell, value);
-  if (!match) return insertCellXml(xml, cell, cellXml);
-  return xml.replace(cellRe, cellXml);
-}
-
-function makeCellXml(cell: string, value: string | number | null): string {
-  if (typeof value === 'number') return `<c r="${cell}"><v>${value}</v></c>`;
-  if (value === null || value === undefined) return `<c r="${cell}"/>`;
-  return `<c r="${cell}" t="inlineStr"><is><t>${xmlEncode(String(value))}</t></is></c>`;
-}
-
-function insertCellXml(xml: string, cell: string, cellXml: string): string {
-  const rowNumber = Number(cell.match(/\d+/)?.[0] ?? 0);
-  if (!rowNumber) throw new Error(`无效 cell 地址：${cell}`);
-  const rowRe = new RegExp(`(<row\\b[^>]*\\br="${rowNumber}"[^>]*>)([\\s\\S]*?)(<\\/row>)`);
-  const rowMatch = xml.match(rowRe);
-  if (!rowMatch) {
-    const selfClosingRowRe = new RegExp(`<row\\b[^>]*\\br="${rowNumber}"[^>]*\\/>`);
-    if (selfClosingRowRe.test(xml)) return xml.replace(selfClosingRowRe, (row) => row.replace(/\/>$/, `>${cellXml}</row>`));
-    return insertRowXml(xml, rowNumber, cellXml);
-  }
-  return xml.replace(rowRe, (_whole, open: string, body: string, close: string) => `${open}${insertCellInRow(body, cell, cellXml)}${close}`);
-}
-
-function insertRowXml(xml: string, rowNumber: number, cellXml: string): string {
-  const sheetDataRe = /(<sheetData[^>]*>)([\s\S]*?)(<\/sheetData>)/;
-  const match = xml.match(sheetDataRe);
-  if (!match) throw new Error(`sheet XML 中找不到 sheetData，无法插入 row ${rowNumber}。`);
-  const body = match[2];
-  const rowXml = `<row r="${rowNumber}">${cellXml}</row>`;
-  const rows = allMatches(body, /<row\b[^>]*\br="(\d+)"[^>]*(?:\/>|>[\s\S]*?<\/row>)/g);
-  for (const row of rows) {
-    if (Number(row[1]) > rowNumber) {
-      const index = row.index ?? 0;
-      const nextBody = `${body.slice(0, index)}${rowXml}${body.slice(index)}`;
-      return xml.replace(sheetDataRe, `${match[1]}${nextBody}${match[3]}`);
-    }
-  }
-  return xml.replace(sheetDataRe, `${match[1]}${body}${rowXml}${match[3]}`);
-}
-
-function insertCellInRow(rowBody: string, cell: string, cellXml: string): string {
-  const target = cellAddressOrder(cell);
-  const cells = allMatches(rowBody, /<c\b[^>]*\br="([^"]+)"[^>]*(?:\/>|>[\s\S]*?<\/c>)/g);
-  for (const existing of cells) {
-    if (cellAddressOrder(existing[1]) > target) {
-      const index = existing.index ?? 0;
-      return `${rowBody.slice(0, index)}${cellXml}${rowBody.slice(index)}`;
-    }
-  }
-  return `${rowBody}${cellXml}`;
-}
-
 function levelShifterPayload(): { version: number; levelShifter: unknown; tpGenerator: TpGeneratorConfig } {
   return {
     version: 1,
@@ -2887,47 +2900,6 @@ function levelShifterReportState(): unknown {
   }
   if (isEkConfig(ls)) return { ...ls, outputCount: ek86707aSet1OutputCount(ls.set1) * (ls.model === 'dual-ek86707a' ? 2 : 1) };
   return ls;
-}
-
-function cellAddressOrder(cell: string): number {
-  const match = cell.match(/^([A-Z]+)(\d+)$/i);
-  if (!match) return Number.MAX_SAFE_INTEGER;
-  let col = 0;
-  for (const ch of match[1].toUpperCase()) col = col * 26 + ch.charCodeAt(0) - 64;
-  return Number(match[2]) * 100000 + col;
-}
-
-function allMatches(text: string, re: RegExp): RegExpExecArray[] {
-  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
-  const globalRe = new RegExp(re.source, flags);
-  const matches: RegExpExecArray[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = globalRe.exec(text))) {
-    matches.push(match);
-    if (match[0].length === 0) globalRe.lastIndex += 1;
-  }
-  return matches;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function xmlEncode(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function xmlDecode(value: string): string {
-  return value
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&gt;/g, '>')
-    .replace(/&lt;/g, '<')
-    .replace(/&amp;/g, '&');
 }
 
 function download(name: string, content: string | Uint8Array, type: string): void {

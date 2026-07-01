@@ -167,8 +167,8 @@ export function simulateGpoWindow(gpo: GpoConfig, timing: TimingBase, bypassMask
   const total = linePcnt * timing.vtotal * Math.max(1, frameWindow);
   const frameTotal = linePcnt * timing.vtotal;
   const enabled = gpo.entries.filter((entry) => entry.enabled).sort((a, b) => {
-    const aa = gpo.repeatMode === 0 ? absPcnt(a.lcnt, a.pcnt, linePcnt) : absPcnt(a.lcnt, a.pcnt, linePcnt);
-    const bb = gpo.repeatMode === 0 ? absPcnt(b.lcnt, b.pcnt, linePcnt) : absPcnt(b.lcnt, b.pcnt, linePcnt);
+    const aa = absPcnt(a.lcnt, a.pcnt, linePcnt);
+    const bb = absPcnt(b.lcnt, b.pcnt, linePcnt);
     return gpo.repeatMode === 0 ? aa - bb || a.index - b.index : a.frameCount - b.frameCount || aa - bb || a.index - b.index;
   });
   let segments = gpo.repeatMode === 0 ? byLineSegments(gpo, enabled, timing, frameWindow) : byFrameSegments(gpo, enabled, timing, frameWindow);
@@ -367,7 +367,7 @@ function makeSignal(id: string, name: string, kind: SignalTrace['kind'], segment
   };
 }
 
-function extractEdges(signalId: string, signalName: string, segments: Segment[], gpoIndex?: number): Edge[] {
+export function extractEdges(signalId: string, signalName: string, segments: Segment[], gpoIndex?: number): Edge[] {
   const edges: Edge[] = [];
   let prevLevel: LogicLevel = 0;
   for (const segment of segments) {
