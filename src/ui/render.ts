@@ -1313,7 +1313,7 @@ function measurementSection(): string {
     <section class="panelSection measureSection">
       <div class="sectionHead">
         <h3>Measurement / Calculator</h3>
-        <span class="sectionMeta">点结果行选中 → 点任意 entry 的 PCNT 算出结果 → 点 cell 列的结果写入</span>
+        <span class="sectionMeta">点结果行选中 → 点任意 entry 的 PCNT 算出修正量 → 点 cell 列的结果写入</span>
       </div>
       <p class="hint">当前等待选择 ${nextRole}（在左侧波形上点边沿，或下面下拉选）。Target 支持 3us / 300ns / 0.02ms / 445pcnt / 2lcnt；不写单位默认 us。</p>
       <div class="measureControls">
@@ -1323,7 +1323,7 @@ function measurementSection(): string {
       </div>
       ${results.length === 0
         ? '<p class="hint">还没有测量：在左侧波形上点两个边沿（起点 / 终点），再点「新增 Tn」。</p>'
-        : `<table><thead><tr><th>ID</th><th>起点</th><th>终点</th><th>实测</th><th>Target</th><th>当前-目标</th><th>操作</th></tr></thead><tbody>
+        : `<table><thead><tr><th>ID</th><th>起点</th><th>终点</th><th>实测</th><th>Target</th><th>PCNT 修正量</th><th>操作</th></tr></thead><tbody>
       ${results.map((m, index) => measurementRow(m, index)).join('')}
     </tbody></table>`}
     </section>`;
@@ -1369,8 +1369,8 @@ function selectMeasurement(root: HTMLElement, id: string | undefined): void {
   const landed = endTarget ?? startTarget;
   if (landed) state.selectedGpo = landed.gpo.index;
   state.message = active.errorPcnt === undefined
-    ? `已选中 ${active.id}：先填 Target，再点任意 entry 的 PCNT 算差值结果`
-    : `已选中 ${active.id}（差值 ${active.errorPcnt >= 0 ? '+' : ''}${active.errorPcnt}pcnt）：点任意 entry 的 PCNT 算结果，再点 cell 列的结果写入`;
+    ? `已选中 ${active.id}：先填 Target，再点任意 entry 的 PCNT 算修正量`
+    : `已选中 ${active.id}（修正量 ${-active.errorPcnt >= 0 ? '+' : '-'}${Math.abs(active.errorPcnt)}pcnt）：点任意 entry 的 PCNT 算结果，再点 cell 列的结果写入`;
   render(root);
 }
 
@@ -1381,7 +1381,7 @@ function measurementTargetHint(m: MeasurementResult): string {
   const startTarget = m.startEdge ? draggableEdgeTarget(m.startEdge) : undefined;
   if (endTarget) parts.push(`终点边沿在 ${endTarget.gpo.group} entry${endTarget.entry.index}`);
   if (startTarget) parts.push(`起点边沿在 ${startTarget.gpo.group} entry${startTarget.entry.index}`);
-  return parts.length > 0 ? parts.join('；') : '边沿不是 GPO entry：直接点要改的 entry 的 PCNT 就能算差值';
+  return parts.length > 0 ? parts.join('；') : '边沿不是 GPO entry：直接点要改的 entry 的 PCNT 就能算修正量';
 }
 
 /** 这个 entry 是不是当前测量起点/终点边沿所在的 entry（只用于标一行提示）。 */
@@ -1399,11 +1399,11 @@ function deltaPreviewKey(gpoIndex: number, entryIndex: number): string {
   return `${gpoIndex}:${entryIndex}`;
 }
 
-/** 当前选中的测量 + 它算出来的「当前-目标」差值（点了 PCNT 才拿去算结果）。 */
+/** 当前选中的测量 + 要补到 PCNT 上的修正量（= 目标 - 实测：少了就加、多了就减）。 */
 function armedDelta(): { measurement: MeasurementResult; deltaPcnt: number } | undefined {
   const measurement = activeMeasurement();
   if (!measurement || measurement.errorPcnt === undefined) return undefined;
-  return { measurement, deltaPcnt: measurement.errorPcnt };
+  return { measurement, deltaPcnt: -measurement.errorPcnt };
 }
 
 /** PCNT 加差值后的位置（负数留给违反点屏逻辑的弹窗判断）。 */
@@ -1416,8 +1416,16 @@ function entryPosition(entry: GpoConfig['entries'][number], deltaPcnt: number, t
   };
 }
 
+/** 点 entry 的 PCNT 后要显示的修正预览：结果 + 是否越界（越界时显示原始负数/大数更直观）。 */
+function deltaPreview(gpo: GpoConfig, entry: GpoConfig['entries'][number], deltaPcnt: number, t: TimingBase): { nextLcnt: number; nextPcnt: number; invalid: boolean; shown: string; reason?: string } {
+  const next = entryPosition(entry, deltaPcnt, t);
+  const reason = entryPositionViolation(gpo, entry, next.abs, t);
+  const shown = reason && next.abs < 0 ? `-${Math.abs(entry.pcnt + deltaPcnt)}` : formatCount4(next.pcnt);
+  return { nextLcnt: next.lcnt, nextPcnt: next.pcnt, invalid: Boolean(reason), shown, reason };
+}
+
 /**
- * 点 entry 的 PCNT：不直接改数据，先把「PCNT + 当前-目标」的结果算出来放到 cell 列，
+ * 点 entry 的 PCNT：不直接改数据，先把「PCNT + 修正量」的结果算出来放到 cell 列，
  * 再点那个结果才真正写入（越界时弹窗提醒并拒绝写入）。
  */
 function previewEntryDelta(root: HTMLElement, gpo: GpoConfig, entry: GpoConfig['entries'][number]): void {
@@ -1427,7 +1435,7 @@ function previewEntryDelta(root: HTMLElement, gpo: GpoConfig, entry: GpoConfig['
   if (active.errorPcnt === undefined) {
     state.modal = {
       title: '还差 Target',
-      body: `测量 ${htmlText(active.id)} 还没有有效 Target。<br/>先在这行的 Target 里填 3us / 445pcnt 这类目标值，才能算出「当前-目标」差值。`,
+      body: `测量 ${htmlText(active.id)} 还没有有效 Target。<br/>先在这行的 Target 里填 3us / 445pcnt 这类目标值，才能算出要补到 PCNT 上的修正量。`,
     };
     render(root);
     return;
@@ -1435,9 +1443,12 @@ function previewEntryDelta(root: HTMLElement, gpo: GpoConfig, entry: GpoConfig['
   const key = deltaPreviewKey(gpo.index, entry.index);
   if (state.deltaPreviewKey === key) return;
   state.deltaPreviewKey = key;
-  const next = entryPosition(entry, active.errorPcnt, t);
-  const deltaText = `${active.errorPcnt >= 0 ? '+' : '-'}${Math.abs(active.errorPcnt)}`;
-  state.message = `${gpo.group} entry${entry.index}：PCNT ${formatCount4(entry.pcnt)} ${deltaText} = ${formatCount4(next.pcnt)}，点 cell 列的 ${formatCount4(next.pcnt)} 写入`;
+  const delta = -active.errorPcnt;
+  const preview = deltaPreview(gpo, entry, delta, t);
+  const deltaText = `${delta >= 0 ? '+' : '-'}${Math.abs(delta)}`;
+  state.message = preview.invalid
+    ? `${gpo.group} entry${entry.index}：PCNT ${formatCount4(entry.pcnt)} ${deltaText} = ${preview.shown}，越界（点了会被拦下）`
+    : `${gpo.group} entry${entry.index}：PCNT ${formatCount4(entry.pcnt)} ${deltaText} = ${preview.shown}，点 cell 列的 ${preview.shown} 写入`;
   render(root);
 }
 
@@ -1453,14 +1464,14 @@ function applyPreviewedDelta(root: HTMLElement, gpoIndex: number, entryIndex: nu
   if (violation) {
     state.modal = {
       title: '违反点屏逻辑，已取消修改',
-      body: `${violation}<br/><br/>差值 ${armed.deltaPcnt >= 0 ? '+' : ''}${armed.deltaPcnt}pcnt 没有写入，请重新设计方案。`,
+      body: `${violation}<br/><br/>修正量 ${armed.deltaPcnt >= 0 ? '+' : ''}${armed.deltaPcnt}pcnt 没有写入，请重新设计方案。`,
     };
     render(root);
     return;
   }
   if (next.lcnt === before.lcnt && next.pcnt === before.pcnt) {
     state.deltaPreviewKey = undefined;
-    state.message = '差值没有改变 entry 位置';
+    state.message = '修正量没有改变 entry 位置';
     render(root);
     return;
   }
@@ -1474,25 +1485,25 @@ function applyPreviewedDelta(root: HTMLElement, gpoIndex: number, entryIndex: nu
   state.project.dirty = true;
   recalc(root, {
     preserveView: true,
-    successMessage: `已写入 ${armed.measurement.id} 差值 ${armed.deltaPcnt >= 0 ? '+' : ''}${armed.deltaPcnt}pcnt：${gpo.group} entry${entry.index} PCNT ${formatCount4(before.pcnt)}→${formatCount4(next.pcnt)}、LCNT ${formatCount4(before.lcnt)}→${formatCount4(next.lcnt)}（现在第 ${next.lcnt} 行）`,
+    successMessage: `已写入 ${armed.measurement.id} 修正量 ${armed.deltaPcnt >= 0 ? '+' : ''}${armed.deltaPcnt}pcnt：${gpo.group} entry${entry.index} PCNT ${formatCount4(before.pcnt)}→${formatCount4(next.pcnt)}、LCNT ${formatCount4(before.lcnt)}→${formatCount4(next.lcnt)}（现在第 ${next.lcnt} 行）`,
   });
 }
 
 function entryPositionViolation(gpo: GpoConfig, entry: GpoConfig['entries'][number], nextAbs: number, t: TimingBase): string | undefined {
   const label = `${gpo.group} entry${entry.index}`;
   if (nextAbs < 0) {
-    return `${label} 套用差值后位置是负数（${nextAbs}pcnt），PCNT / LCNT 不能为负。`;
+    return `${label} 套用修正量后位置是负数（${nextAbs}pcnt），PCNT / LCNT 不能为负。`;
   }
   const nextLcnt = Math.floor(nextAbs / t.pcntPerLine);
   const nextPcnt = nextAbs % t.pcntPerLine;
   if (nextLcnt >= t.vtotal) {
-    return `${label} 套用差值后落到第 ${nextLcnt} 行，已经超过 Vtotal=${formatCount4(t.vtotal)}，加起来超出一帧。`;
+    return `${label} 套用修正量后落到第 ${nextLcnt} 行，已经超过 Vtotal=${formatCount4(t.vtotal)}，加起来超出一帧。`;
   }
   if (nextPcnt > t.pcntMax) {
-    return `${label} 套用差值后 PCNT=${formatCount4(nextPcnt)} 超过当前限制 ${formatCount4(t.pcntMax)}（一行只有 ${formatCount4(t.pcntPerLine)}pcnt）。`;
+    return `${label} 套用修正量后 PCNT=${formatCount4(nextPcnt)} 超过当前限制 ${formatCount4(t.pcntMax)}（一行只有 ${formatCount4(t.pcntPerLine)}pcnt）。`;
   }
   if (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && nextLcnt !== entry.lcnt) {
-    return `${label} 是 by-line（Repeat_mode_SEL=0），差值会把 PCNT 推到第 ${nextLcnt} 行，但 by-line 不允许改 LCNT。`;
+    return `${label} 是 by-line（Repeat_mode_SEL=0），修正量会把 PCNT 推到第 ${nextLcnt} 行，但 by-line 不允许改 LCNT。`;
   }
   return undefined;
 }
@@ -1529,7 +1540,7 @@ function entryTable(gpo: GpoConfig): string {
   const active = activeMeasurement();
   const targetHint = active ? measurementTargetHint(active) : '';
   const armed = Boolean(active);
-  return `<table><thead><tr><th>entry</th><th>FCNT</th><th>EN</th><th>level</th><th>LCNT</th><th>PCNT</th><th>当前行 / 差值结果</th></tr></thead><tbody>
+  return `<table><thead><tr><th>entry</th><th>FCNT</th><th>EN</th><th>level</th><th>LCNT</th><th>PCNT</th><th>当前行 / 修正结果</th></tr></thead><tbody>
     ${gpo.entries.map((e) => {
       const baseline = memoryEntry(gpo.index, e.index);
       const edgeRole = measurementEdgeRole(gpo, e.index);
@@ -1540,14 +1551,14 @@ function entryTable(gpo: GpoConfig): string {
       <td class="${compareClass(baseline?.enabled, e.enabled)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="enabled" type="number" min="0" max="1" value="${e.enabled ? 1 : 0}" />` : e.enabled ? '1' : '0'}${compareHint(baseline?.enabled, e.enabled, formatBool)}</td>
       <td class="${compareClass(baseline?.level, e.level)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="level" type="number" min="0" max="1" value="${e.level}" />` : e.level ? 'HIGH' : 'LOW'}${compareHint(baseline?.level, e.level, String)}</td>
       <td class="${compareClass(baseline?.lcnt, e.lcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="lcnt"`, e.lcnt, gpo.repeatMode === 0 && gpo.soc !== 'mt9603' ? 'disabled title="by-line 禁止修改 LCNT"' : '')}${compareHint(baseline?.lcnt, e.lcnt, formatCount4)}</td>
-      <td class="${compareClass(baseline?.pcnt, e.pcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="pcnt"${armed ? ' class="pcntArmed" data-pcnt-armed="1" title="点这里按测量差值算结果"' : ''}`, e.pcnt)}${compareHint(baseline?.pcnt, e.pcnt, formatCount4)}</td>
+      <td class="${compareClass(baseline?.pcnt, e.pcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="pcnt"${armed ? ' class="pcntArmed" data-pcnt-armed="1" title="点这里按测量修正量算结果"' : ''}`, e.pcnt)}${compareHint(baseline?.pcnt, e.pcnt, formatCount4)}</td>
       <td class="entryLineCell" title="${htmlAttr(entryCellTitle(e))}">${entryLineHint(gpo, e)}</td>
     </tr>`;
     }).join('')}
   </tbody></table>${targetHint ? `<p class="hint deltaHint">${htmlText(targetHint)}</p>` : ''}`;
 }
 
-/** cell 列：默认显示当前行；点过 PCNT 后显示「PCNT + 差值」的计算结果，点结果才写入。 */
+/** cell 列：默认显示当前行；点过 PCNT 后显示「PCNT + 修正量」的结果，点结果才写入。 */
 function entryLineHint(gpo: GpoConfig, entry: GpoConfig['entries'][number]): string {
   const applied = state.appliedEntryHint;
   const isApplied = Boolean(applied && applied.gpoIndex === gpo.index && applied.entryIndex === entry.index);
@@ -1557,15 +1568,12 @@ function entryLineHint(gpo: GpoConfig, entry: GpoConfig['entries'][number]): str
     const armed = armedDelta();
     const t = state.project.timing;
     if (armed && t) {
-      const next = entryPosition(entry, armed.deltaPcnt, t);
+      const preview = deltaPreview(gpo, entry, armed.deltaPcnt, t);
       const deltaText = `${armed.deltaPcnt >= 0 ? '+' : '-'}${Math.abs(armed.deltaPcnt)}`;
-      const overLine = next.lcnt >= t.vtotal;
-      const bad = next.abs < 0 || overLine || next.pcnt > t.pcntMax || (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && next.lcnt !== entry.lcnt);
-      const shown = next.abs < 0 ? `-${formatCount4(Math.abs(next.abs))}` : formatCount4(next.pcnt);
-      const note = bad
+      const note = preview.invalid
         ? `<small class="deltaApplyBad">越界，点了会被拦下</small>`
-        : next.lcnt !== entry.lcnt ? `<small class="deltaApplyNote">→ 第 ${next.lcnt} 行</small>` : '';
-      return `${line}<button class="deltaApplyBtn${bad ? ' bad' : ''}" data-delta-apply-gpo="${gpo.index}" data-delta-apply-entry="${entry.index}" title="点这里把 PCNT 写成 ${shown}">${shown}</button>${note}<small class="deltaApplyNote">${formatCount4(entry.pcnt)} ${deltaText}</small>`;
+        : preview.nextLcnt !== entry.lcnt ? `<small class="deltaApplyNote">→ 第 ${preview.nextLcnt} 行</small>` : '';
+      return `${line}<button class="deltaApplyBtn${preview.invalid ? ' bad' : ''}" data-delta-apply-gpo="${gpo.index}" data-delta-apply-entry="${entry.index}" title="点这里把 PCNT 写成 ${preview.shown}">${preview.shown}</button>${note}<small class="deltaApplyNote">${formatCount4(entry.pcnt)} ${deltaText}</small>`;
     }
   }
   return `${line}${isApplied && applied ? `<small class="lineApplied">${applied.deltaPcnt >= 0 ? '+' : ''}${applied.deltaPcnt}pcnt 已写入</small>` : ''}`;
@@ -2904,14 +2912,20 @@ function parseTpPeriodMode(value: unknown): TpGeneratorConfig['driverTpPeriodMod
   return value === 'time' || value === 'pcnt' || value === 'line' ? value : 'line';
 }
 
+/**
+ * 「少 1us → PCNT 要加」：这里显示的是要补到 PCNT 上的修正量（= 目标 - 实测），
+ * 不是 实测-目标；鼠标悬停可以看到原始差值。
+ */
 function formatTargetDelta(m: NonNullable<DraftProject['simulation']>['measurements'][number]): string {
   if (m.targetSeconds === undefined) return '未设置 target';
   if (m.errorSeconds === undefined || m.errorPcnt === undefined) return '-';
-  const sign = m.errorSeconds >= 0 ? '多' : '少';
-  const absPcnt = Math.abs(m.errorPcnt);
+  const shortByTarget = m.errorSeconds < 0;
+  const applyPcnt = -m.errorPcnt;
+  const absPcnt = Math.abs(applyPcnt);
   const lcnt = state.project.timing ? Math.trunc(absPcnt / state.project.timing.pcntPerLine) : 0;
   const pcnt = state.project.timing ? absPcnt % state.project.timing.pcntPerLine : absPcnt;
-  return `${sign} ${formatDuration(Math.abs(m.errorSeconds))}<br>${m.errorPcnt >= 0 ? '+' : '-'}${absPcnt} pcnt (${m.errorPcnt >= 0 ? '+' : '-'}${formatCount4(lcnt)}lcnt ${formatCount4(pcnt)}pcnt)`;
+  const raw = `实测 ${formatDuration(m.seconds)} − 目标 ${formatDuration(m.targetSeconds)} = ${formatDuration(m.errorSeconds)} = ${m.errorPcnt} pcnt；要补到 PCNT 上的修正量 = ${applyPcnt} pcnt`;
+  return `${shortByTarget ? '少' : '多'} ${formatDuration(Math.abs(m.errorSeconds))}<br><b class="deltaApplyAmount" title="${htmlAttr(raw)}">PCNT ${applyPcnt >= 0 ? '+' : '-'}${absPcnt}</b><small class="deltaApplyAmountNote">(${applyPcnt >= 0 ? '+' : '-'}${formatCount4(lcnt)}lcnt ${formatCount4(pcnt)}pcnt)</small>`;
 }
 
 function selectedReferenceEdge(): Edge | undefined {

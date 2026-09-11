@@ -428,6 +428,8 @@ td input:disabled { background: #111827; color: #6b7b95; }
 .measurePick { color: #ffd36b; }
 .measureTarget { color: var(--muted); }
 .deltaHint { margin: 8px 0 0; font: 11px/1.5 var(--mono); text-transform: none; letter-spacing: 0; }
+.deltaApplyAmount { display: block; margin-top: 4px; color: #ffd36b; font: 700 13px/1.2 var(--mono); letter-spacing: 0.02em; }
+.deltaApplyAmountNote { display: block; margin-top: 3px; color: var(--muted); font: 10px/1.2 var(--mono); text-transform: none; letter-spacing: 0; }
 tr.entryDeltaRow { box-shadow: inset 3px 0 0 var(--accent-2); }
 tr.entryDeltaEnd { background: rgba(156, 175, 136, 0.13); }
 tr.entryDeltaStart { background: rgba(143, 183, 198, 0.09); }
