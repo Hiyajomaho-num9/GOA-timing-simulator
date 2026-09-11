@@ -432,7 +432,24 @@ tr.entryDeltaRow { box-shadow: inset 3px 0 0 var(--accent-2); }
 tr.entryDeltaEnd { background: rgba(156, 175, 136, 0.13); }
 tr.entryDeltaStart { background: rgba(143, 183, 198, 0.09); }
 .entryDeltaTag { display: block; margin-top: 4px; color: #b9d3a0; font: 10px/1.25 var(--mono); text-transform: none; letter-spacing: 0; }
-input.pcntDeltaReady { border-color: rgba(156, 175, 136, 0.85); background: rgba(156, 175, 136, 0.12); box-shadow: inset 2px 0 0 rgba(156, 175, 136, 0.9); cursor: pointer; }
+input.pcntArmed { border-color: rgba(156, 175, 136, 0.75); box-shadow: inset 2px 0 0 rgba(156, 175, 136, 0.75); cursor: pointer; }
+input.pcntArmed:hover { background: rgba(156, 175, 136, 0.14); }
+.deltaApplyBtn {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-color: rgba(156, 175, 136, 0.9);
+  background: rgba(156, 175, 136, 0.18);
+  color: #dbe8c8;
+  font: 700 15px/1.1 var(--mono);
+  letter-spacing: 0.04em;
+}
+.deltaApplyBtn:hover { background: rgba(156, 175, 136, 0.32); border-color: #c3dcab; }
+.deltaApplyBtn.bad { border-color: var(--bad); background: rgba(208, 117, 125, 0.18); color: #f0c4c8; }
+.deltaApplyBtn.bad:hover { background: rgba(208, 117, 125, 0.3); border-color: #e79aa1; }
+.deltaApplyBad { display: block; margin-top: 4px; color: var(--bad); font: 10px/1.25 var(--mono); text-transform: none; letter-spacing: 0; }
+.deltaApplyNote { display: block; margin-top: 4px; color: var(--muted); font: 10px/1.25 var(--mono); text-transform: none; letter-spacing: 0; }
 .entryLineCell .lineNow { display: block; color: var(--ink); font: 700 13px/1.2 var(--mono); }
 .entryLineCell .lineRow,
 .entryLineCell .lineFrame,

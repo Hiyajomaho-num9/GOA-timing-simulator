@@ -77,6 +77,8 @@ const state: {
   activeMeasurementId?: string;
   /** 刚套用差值的 entry，用于在 cell 列给出“现在在第几行”的确认。 */
   appliedEntryHint?: { gpoIndex: number; entryIndex: number; deltaPcnt: number };
+  /** 已经点开差值预览的 entry（cell 列显示计算结果，点结果才写入）。 */
+  deltaPreviewKey?: string;
   /** 违反点屏逻辑时的弹窗内容。 */
   modal?: { title: string; body: string };
   selectedGpo?: number;
@@ -444,6 +446,9 @@ function loadWorkbook(root: HTMLElement, buffer: ArrayBuffer, fileName: string, 
   state.memoryGpos = undefined;
   state.extraSignalIds = [];
   clearReference();
+  state.activeMeasurementId = undefined;
+  state.deltaPreviewKey = undefined;
+  state.appliedEntryHint = undefined;
   state.selectedStartEdge = undefined;
   state.selectedEndEdge = undefined;
   state.selectedGpo = parsed.gpos.find((g) => /cpv1/i.test(g.group))?.index ?? parsed.gpos[0]?.index;
@@ -1308,7 +1313,7 @@ function measurementSection(): string {
     <section class="panelSection measureSection">
       <div class="sectionHead">
         <h3>Measurement / Calculator</h3>
-        <span class="sectionMeta">先点结果行选中，再点高亮 entry 的 PCNT：直接套用「当前-目标」差值</span>
+        <span class="sectionMeta">点结果行选中 → 点任意 entry 的 PCNT 算出结果 → 点 cell 列的结果写入</span>
       </div>
       <p class="hint">当前等待选择 ${nextRole}（在左侧波形上点边沿，或下面下拉选）。Target 支持 3us / 300ns / 0.02ms / 445pcnt / 2lcnt；不写单位默认 us。</p>
       <div class="measureControls">
@@ -1347,11 +1352,12 @@ function activeMeasurement(): MeasurementResult | undefined {
   return (state.project.simulation?.measurements ?? []).find((m) => m.id === id);
 }
 
-/** 选中某条测量结果：高亮该行，并把它两个边沿对应的 GPO entry 一起标出来，方便直接改 PCNT。 */
+/** 选中某条测量结果：高亮该行并把它两个边沿对应的 GPO entry 标出来；之后点任意 entry 的 PCNT 都能按这条差值算结果。 */
 function selectMeasurement(root: HTMLElement, id: string | undefined): void {
   if (!id) return;
   const next = state.activeMeasurementId === id ? undefined : id;
   state.activeMeasurementId = next;
+  state.deltaPreviewKey = undefined;
   const active = activeMeasurement();
   if (!active) {
     state.message = '已取消测量选择';
@@ -1362,24 +1368,24 @@ function selectMeasurement(root: HTMLElement, id: string | undefined): void {
   const startTarget = active.startEdge ? draggableEdgeTarget(active.startEdge) : undefined;
   const landed = endTarget ?? startTarget;
   if (landed) state.selectedGpo = landed.gpo.index;
-  state.message = endTarget
-    ? `已选中 ${active.id}：点 ${endTarget.gpo.group} entry${endTarget.entry.index} 的 PCNT 即可按差值修正`
-    : `已选中 ${active.id}：这条测量的边沿不是可直接改的 GPO entry`;
+  state.message = active.errorPcnt === undefined
+    ? `已选中 ${active.id}：先填 Target，再点任意 entry 的 PCNT 算差值结果`
+    : `已选中 ${active.id}（差值 ${active.errorPcnt >= 0 ? '+' : ''}${active.errorPcnt}pcnt）：点任意 entry 的 PCNT 算结果，再点 cell 列的结果写入`;
   render(root);
 }
 
-/** 这条测量的两个边沿分别落在哪个 GPO entry 上（终点套用 -差值、起点套用 +差值）。 */
+/** 这条测量的两个边沿落在哪个 GPO entry 上（只作提示，不限制差值只能套到这两个 entry）。 */
 function measurementTargetHint(m: MeasurementResult): string {
   const parts: string[] = [];
   const endTarget = m.endEdge ? draggableEdgeTarget(m.endEdge) : undefined;
   const startTarget = m.startEdge ? draggableEdgeTarget(m.startEdge) : undefined;
-  if (endTarget) parts.push(`终点 → ${endTarget.gpo.group} entry${endTarget.entry.index}（-差值）`);
-  if (startTarget) parts.push(`起点 → ${startTarget.gpo.group} entry${startTarget.entry.index}（+差值）`);
-  return parts.length > 0 ? parts.join('；') : '两个边沿都不是可改的 GPO entry，无法自动套用差值';
+  if (endTarget) parts.push(`终点边沿在 ${endTarget.gpo.group} entry${endTarget.entry.index}`);
+  if (startTarget) parts.push(`起点边沿在 ${startTarget.gpo.group} entry${startTarget.entry.index}`);
+  return parts.length > 0 ? parts.join('；') : '边沿不是 GPO entry：直接点要改的 entry 的 PCNT 就能算差值';
 }
 
-/** 这个 entry 是不是当前测量的差值落点。 */
-function measurementDeltaRole(gpo: GpoConfig, entryIndex: number): 'start' | 'end' | undefined {
+/** 这个 entry 是不是当前测量起点/终点边沿所在的 entry（只用于标一行提示）。 */
+function measurementEdgeRole(gpo: GpoConfig, entryIndex: number): 'start' | 'end' | undefined {
   const active = activeMeasurement();
   if (!active) return undefined;
   const endTarget = active.endEdge ? draggableEdgeTarget(active.endEdge) : undefined;
@@ -1389,17 +1395,35 @@ function measurementDeltaRole(gpo: GpoConfig, entryIndex: number): 'start' | 'en
   return undefined;
 }
 
+function deltaPreviewKey(gpoIndex: number, entryIndex: number): string {
+  return `${gpoIndex}:${entryIndex}`;
+}
+
+/** 当前选中的测量 + 它算出来的「当前-目标」差值（点了 PCNT 才拿去算结果）。 */
+function armedDelta(): { measurement: MeasurementResult; deltaPcnt: number } | undefined {
+  const measurement = activeMeasurement();
+  if (!measurement || measurement.errorPcnt === undefined) return undefined;
+  return { measurement, deltaPcnt: measurement.errorPcnt };
+}
+
+/** PCNT 加差值后的位置（负数留给违反点屏逻辑的弹窗判断）。 */
+function entryPosition(entry: GpoConfig['entries'][number], deltaPcnt: number, t: TimingBase): { abs: number; lcnt: number; pcnt: number } {
+  const abs = entry.lcnt * t.pcntPerLine + entry.pcnt + deltaPcnt;
+  return {
+    abs,
+    lcnt: Math.floor(abs / t.pcntPerLine),
+    pcnt: abs % t.pcntPerLine,
+  };
+}
+
 /**
- * 点 PCNT 时套用测量差值：终点 entry 减差值、起点 entry 加差值。
- * 结果越界（负数 / 超过 Vtotal / 超过 PCNT 限制 / by-line 被迫跨行）→ 弹窗提醒，不改数据。
+ * 点 entry 的 PCNT：不直接改数据，先把「PCNT + 当前-目标」的结果算出来放到 cell 列，
+ * 再点那个结果才真正写入（越界时弹窗提醒并拒绝写入）。
  */
-function applyMeasurementDelta(root: HTMLElement, input: HTMLInputElement): void {
+function previewEntryDelta(root: HTMLElement, gpo: GpoConfig, entry: GpoConfig['entries'][number]): void {
   const t = state.project.timing;
-  const gpo = selectedGpo();
   const active = activeMeasurement();
-  if (!t || !gpo || !active) return;
-  const entry = gpo.entries.find((item) => item.index === Number(input.dataset.entry));
-  if (!entry) return;
+  if (!t || !active) return;
   if (active.errorPcnt === undefined) {
     state.modal = {
       title: '还差 Target',
@@ -1408,40 +1432,49 @@ function applyMeasurementDelta(root: HTMLElement, input: HTMLInputElement): void
     render(root);
     return;
   }
-  if (active.errorPcnt === 0) {
-    state.message = `${active.id} 实测已经等于 Target，不需要修正`;
-    render(root);
-    return;
-  }
-  const role = measurementDeltaRole(gpo, entry.index);
-  if (!role) return;
-  const delta = role === 'end' ? -active.errorPcnt : active.errorPcnt;
+  const key = deltaPreviewKey(gpo.index, entry.index);
+  if (state.deltaPreviewKey === key) return;
+  state.deltaPreviewKey = key;
+  const next = entryPosition(entry, active.errorPcnt, t);
+  const deltaText = `${active.errorPcnt >= 0 ? '+' : '-'}${Math.abs(active.errorPcnt)}`;
+  state.message = `${gpo.group} entry${entry.index}：PCNT ${formatCount4(entry.pcnt)} ${deltaText} = ${formatCount4(next.pcnt)}，点 cell 列的 ${formatCount4(next.pcnt)} 写入`;
+  render(root);
+}
+
+function applyPreviewedDelta(root: HTMLElement, gpoIndex: number, entryIndex: number): void {
+  const t = state.project.timing;
+  const gpo = state.project.gpos.find((item) => item.index === gpoIndex);
+  const entry = gpo?.entries.find((item) => item.index === entryIndex);
+  const armed = armedDelta();
+  if (!t || !gpo || !entry || !armed) return;
   const before = { lcnt: entry.lcnt, pcnt: entry.pcnt };
-  const nextAbs = before.lcnt * t.pcntPerLine + before.pcnt + delta;
-  const violation = entryPositionViolation(gpo, entry, nextAbs, t);
+  const next = entryPosition(entry, armed.deltaPcnt, t);
+  const violation = entryPositionViolation(gpo, entry, next.abs, t);
   if (violation) {
-    state.modal = { title: '违反点屏逻辑，已取消修改', body: `${violation}<br/><br/>差值 ${delta >= 0 ? '+' : ''}${delta}pcnt 没有写入，请重新设计方案。` };
+    state.modal = {
+      title: '违反点屏逻辑，已取消修改',
+      body: `${violation}<br/><br/>差值 ${armed.deltaPcnt >= 0 ? '+' : ''}${armed.deltaPcnt}pcnt 没有写入，请重新设计方案。`,
+    };
     render(root);
     return;
   }
-  const nextLcnt = Math.floor(nextAbs / t.pcntPerLine);
-  const nextPcnt = nextAbs % t.pcntPerLine;
-  if (nextLcnt === before.lcnt && nextPcnt === before.pcnt) {
+  if (next.lcnt === before.lcnt && next.pcnt === before.pcnt) {
+    state.deltaPreviewKey = undefined;
     state.message = '差值没有改变 entry 位置';
     render(root);
     return;
   }
-  entry.lcnt = nextLcnt;
-  entry.pcnt = nextPcnt;
-  if (nextLcnt !== before.lcnt) addPatch(gpo, 'lcnt', entry.index, before.lcnt, nextLcnt);
-  if (nextPcnt !== before.pcnt) addPatch(gpo, 'pcnt', entry.index, before.pcnt, nextPcnt);
+  entry.lcnt = next.lcnt;
+  entry.pcnt = next.pcnt;
+  if (next.lcnt !== before.lcnt) addPatch(gpo, 'lcnt', entry.index, before.lcnt, next.lcnt);
+  if (next.pcnt !== before.pcnt) addPatch(gpo, 'pcnt', entry.index, before.pcnt, next.pcnt);
   state.selectedGpo = gpo.index;
-  state.appliedEntryHint = { gpoIndex: gpo.index, entryIndex: entry.index, deltaPcnt: delta };
-  state.activeMeasurementId = undefined;
+  state.appliedEntryHint = { gpoIndex, entryIndex, deltaPcnt: armed.deltaPcnt };
+  state.deltaPreviewKey = undefined;
   state.project.dirty = true;
   recalc(root, {
     preserveView: true,
-    successMessage: `已套用 ${active.id} 差值 ${delta >= 0 ? '+' : ''}${delta}pcnt：${gpo.group} entry${entry.index} PCNT ${formatCount4(before.pcnt)}→${formatCount4(nextPcnt)}、LCNT ${formatCount4(before.lcnt)}→${formatCount4(nextLcnt)}（现在第 ${nextLcnt} 行）`,
+    successMessage: `已写入 ${armed.measurement.id} 差值 ${armed.deltaPcnt >= 0 ? '+' : ''}${armed.deltaPcnt}pcnt：${gpo.group} entry${entry.index} PCNT ${formatCount4(before.pcnt)}→${formatCount4(next.pcnt)}、LCNT ${formatCount4(before.lcnt)}→${formatCount4(next.lcnt)}（现在第 ${next.lcnt} 行）`,
   });
 }
 
@@ -1495,30 +1528,47 @@ function gpoSelector(gpos: GpoConfig[]): string {
 function entryTable(gpo: GpoConfig): string {
   const active = activeMeasurement();
   const targetHint = active ? measurementTargetHint(active) : '';
-  return `<table><thead><tr><th>entry</th><th>FCNT</th><th>EN</th><th>level</th><th>LCNT</th><th>PCNT</th><th>当前行 / cell</th></tr></thead><tbody>
+  const armed = Boolean(active);
+  return `<table><thead><tr><th>entry</th><th>FCNT</th><th>EN</th><th>level</th><th>LCNT</th><th>PCNT</th><th>当前行 / 差值结果</th></tr></thead><tbody>
     ${gpo.entries.map((e) => {
       const baseline = memoryEntry(gpo.index, e.index);
-      const deltaRole = measurementDeltaRole(gpo, e.index);
-      const rowClass = deltaRole === 'end' ? 'entryDeltaRow entryDeltaEnd' : deltaRole === 'start' ? 'entryDeltaRow entryDeltaStart' : '';
+      const edgeRole = measurementEdgeRole(gpo, e.index);
+      const rowClass = edgeRole === 'end' ? 'entryDeltaRow entryDeltaEnd' : edgeRole === 'start' ? 'entryDeltaRow entryDeltaStart' : '';
       return `<tr class="${rowClass}" data-entry-row="${e.index}">
-      <td>${e.index}${deltaRole ? `<small class="entryDeltaTag">${deltaRole === 'end' ? '套用 -差值' : '套用 +差值'}</small>` : ''}</td>
+      <td>${e.index}${edgeRole ? `<small class="entryDeltaTag">${edgeRole === 'end' ? '终点边沿' : '起点边沿'}</small>` : ''}</td>
       <td class="${compareClass(baseline?.fcnt, e.fcnt)}"><input data-entry="${e.index}" data-entry-field="fcnt" value="0x${e.fcnt.toString(16).toUpperCase()}" />${compareHint(baseline?.fcnt, e.fcnt, formatHex)}</td>
       <td class="${compareClass(baseline?.enabled, e.enabled)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="enabled" type="number" min="0" max="1" value="${e.enabled ? 1 : 0}" />` : e.enabled ? '1' : '0'}${compareHint(baseline?.enabled, e.enabled, formatBool)}</td>
       <td class="${compareClass(baseline?.level, e.level)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="level" type="number" min="0" max="1" value="${e.level}" />` : e.level ? 'HIGH' : 'LOW'}${compareHint(baseline?.level, e.level, String)}</td>
       <td class="${compareClass(baseline?.lcnt, e.lcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="lcnt"`, e.lcnt, gpo.repeatMode === 0 && gpo.soc !== 'mt9603' ? 'disabled title="by-line 禁止修改 LCNT"' : '')}${compareHint(baseline?.lcnt, e.lcnt, formatCount4)}</td>
-      <td class="${compareClass(baseline?.pcnt, e.pcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="pcnt"${deltaRole ? ' class="pcntDeltaReady" data-delta-apply="1" title="套用测量差值"' : ''}`, e.pcnt)}${compareHint(baseline?.pcnt, e.pcnt, formatCount4)}</td>
+      <td class="${compareClass(baseline?.pcnt, e.pcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="pcnt"${armed ? ' class="pcntArmed" data-pcnt-armed="1" title="点这里按测量差值算结果"' : ''}`, e.pcnt)}${compareHint(baseline?.pcnt, e.pcnt, formatCount4)}</td>
       <td class="entryLineCell" title="${htmlAttr(entryCellTitle(e))}">${entryLineHint(gpo, e)}</td>
     </tr>`;
     }).join('')}
   </tbody></table>${targetHint ? `<p class="hint deltaHint">${htmlText(targetHint)}</p>` : ''}`;
 }
 
-/** LCNT / 增量见 cell 列：主显当前行，cell 地址放到 title 里。 */
+/** cell 列：默认显示当前行；点过 PCNT 后显示「PCNT + 差值」的计算结果，点结果才写入。 */
 function entryLineHint(gpo: GpoConfig, entry: GpoConfig['entries'][number]): string {
   const applied = state.appliedEntryHint;
   const isApplied = Boolean(applied && applied.gpoIndex === gpo.index && applied.entryIndex === entry.index);
   const frame = gpo.repeatMode === 1 && entry.frameCount > 0 ? `<small class="lineFrame">Frame ${formatCount4(entry.frameCount)}</small>` : '';
-  return `<b class="lineNow">L${formatCount4(entry.lcnt)}</b><small class="lineRow">第 ${entry.lcnt} 行</small>${frame}${isApplied && applied ? `<small class="lineApplied">${applied.deltaPcnt >= 0 ? '+' : ''}${applied.deltaPcnt}pcnt 已套用</small>` : ''}`;
+  const line = `<b class="lineNow">L${formatCount4(entry.lcnt)}</b><small class="lineRow">第 ${entry.lcnt} 行</small>${frame}`;
+  if (state.deltaPreviewKey === deltaPreviewKey(gpo.index, entry.index)) {
+    const armed = armedDelta();
+    const t = state.project.timing;
+    if (armed && t) {
+      const next = entryPosition(entry, armed.deltaPcnt, t);
+      const deltaText = `${armed.deltaPcnt >= 0 ? '+' : '-'}${Math.abs(armed.deltaPcnt)}`;
+      const overLine = next.lcnt >= t.vtotal;
+      const bad = next.abs < 0 || overLine || next.pcnt > t.pcntMax || (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && next.lcnt !== entry.lcnt);
+      const shown = next.abs < 0 ? `-${formatCount4(Math.abs(next.abs))}` : formatCount4(next.pcnt);
+      const note = bad
+        ? `<small class="deltaApplyBad">越界，点了会被拦下</small>`
+        : next.lcnt !== entry.lcnt ? `<small class="deltaApplyNote">→ 第 ${next.lcnt} 行</small>` : '';
+      return `${line}<button class="deltaApplyBtn${bad ? ' bad' : ''}" data-delta-apply-gpo="${gpo.index}" data-delta-apply-entry="${entry.index}" title="点这里把 PCNT 写成 ${shown}">${shown}</button>${note}<small class="deltaApplyNote">${formatCount4(entry.pcnt)} ${deltaText}</small>`;
+    }
+  }
+  return `${line}${isApplied && applied ? `<small class="lineApplied">${applied.deltaPcnt >= 0 ? '+' : ''}${applied.deltaPcnt}pcnt 已写入</small>` : ''}`;
 }
 
 function entryCellTitle(entry: GpoConfig['entries'][number]): string {
@@ -1662,13 +1712,19 @@ function bindPanelEvents(root: HTMLElement): void {
   });
   root.querySelectorAll<HTMLInputElement>('[data-entry]').forEach((input) => {
     input.addEventListener('change', () => updateEntry(root, input));
-    if (input.dataset.entryField === 'pcnt' && input.dataset.deltaApply === '1') {
-      input.addEventListener('mousedown', (event) => {
-        event.preventDefault();
-        applyMeasurementDelta(root, input);
-      });
-    }
+    if (input.dataset.entryField !== 'pcnt' || !input.dataset.pcntArmed) return;
+    input.addEventListener('mousedown', (event) => {
+      const gpo = selectedGpo();
+      const entry = gpo?.entries.find((item) => item.index === Number(input.dataset.entry));
+      if (!gpo || !entry) return;
+      if (state.deltaPreviewKey === deltaPreviewKey(gpo.index, entry.index)) return;
+      event.preventDefault();
+      previewEntryDelta(root, gpo, entry);
+    });
   });
+  root.querySelectorAll<HTMLButtonElement>('[data-delta-apply-entry]').forEach((button) => button.addEventListener('click', () => {
+    applyPreviewedDelta(root, Number(button.dataset.deltaApplyGpo), Number(button.dataset.deltaApplyEntry));
+  }));
   root.querySelectorAll<HTMLTableRowElement>('[data-measure-row]').forEach((row) => row.addEventListener('click', (event) => {
     if ((event.target as HTMLElement).closest('input, button, select')) return;
     selectMeasurement(root, row.dataset.measureRow);
@@ -1679,7 +1735,12 @@ function bindPanelEvents(root: HTMLElement): void {
   root.querySelectorAll<HTMLInputElement>('[data-measure-field]').forEach((input) => input.addEventListener('change', () => updateMeasurementField(root, input)));
   root.querySelectorAll<HTMLButtonElement>('[data-delete-measure]').forEach((button) => button.addEventListener('click', () => {
     const index = Number(button.dataset.deleteMeasure);
+    const removed = state.project.measurements[index];
     state.project.measurements.splice(index, 1);
+    if (removed && removed.id === state.activeMeasurementId) {
+      state.activeMeasurementId = undefined;
+      state.deltaPreviewKey = undefined;
+    }
     recalc(root, { preserveView: true, clearTransientCursors: true });
   }));
   root.querySelector<HTMLButtonElement>('#addMeasurementBtn')?.addEventListener('click', () => {
@@ -2029,6 +2090,7 @@ function addPatch(gpo: GpoConfig, field: 'enabled' | 'level' | 'fcnt' | 'lcnt' |
 function markDirty(root: HTMLElement, preserveView = true): void {
   state.project.dirty = true;
   state.appliedEntryHint = undefined;
+  state.deltaPreviewKey = undefined;
   state.message = '调试参数已修改，已实时刷新波形';
   if (state.project.timing) recalc(root, { preserveView, clearTransientCursors: true });
   else render(root);
