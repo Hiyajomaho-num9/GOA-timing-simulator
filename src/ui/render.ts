@@ -1,4 +1,4 @@
-import { defaultDualEk86707aConfig, defaultEk86752bConfig, defaultIml7272bConfig, defaultLevelShifterConfig, defaultNoLevelShifterConfig, defaultTpGeneratorConfig, ek86707aSet1OutputCount, type DraftProject, type DualEk86707aConfig, type Edge, type Ek86707aConfig, type Ek86707aInputs, type Ek86752bConfig, type Ek86752bInputs, type EkSet1Level, type GpoConfig, type Iml7272bConfig, type LevelShifterConfig, type SignalTrace, type SocProfile, type TpGeneratorConfig } from '../core/types';
+import { defaultDualEk86707aConfig, defaultEk86752bConfig, defaultIml7272bConfig, defaultLevelShifterConfig, defaultNoLevelShifterConfig, defaultTpGeneratorConfig, ek86707aSet1OutputCount, type DraftProject, type DualEk86707aConfig, type Edge, type Ek86707aConfig, type Ek86707aInputs, type Ek86752bConfig, type Ek86752bInputs, type EkSet1Level, type GpoConfig, type Iml7272bConfig, type LevelShifterConfig, type SignalTrace, type SocProfile, type TimingBase, type TpGeneratorConfig } from '../core/types';
 import { parseXlsxBuffer, type SocProfileSelection } from '../core/xlsxParser';
 import { simulateProject } from '../core/simulator';
 import { formatCount4, formatDuration, formatPcnt, makeTimingBase } from '../core/time';
@@ -73,6 +73,12 @@ const state: {
   referenceSource?: 'user' | 'preset';
   selectedStartEdge?: string;
   selectedEndEdge?: string;
+  /** 当前选中的测量结果（点 Measurement 行高亮）：选中后 entry 的 PCNT 可直接套用差值。 */
+  activeMeasurementId?: string;
+  /** 刚套用差值的 entry，用于在 cell 列给出“现在在第几行”的确认。 */
+  appliedEntryHint?: { gpoIndex: number; entryIndex: number; deltaPcnt: number };
+  /** 违反点屏逻辑时的弹窗内容。 */
+  modal?: { title: string; body: string };
   selectedGpo?: number;
   message: string;
   hoverEdge?: Edge;
@@ -197,7 +203,8 @@ function layout(): string {
           <div id="tabPanel" class="tabPanel"></div>
         </section>
       </main>
-    </div>`;
+    </div>
+    <div id="modalHost"></div>`;
 }
 
 function bindStaticEvents(root: HTMLElement): void {
@@ -373,12 +380,17 @@ function bindStaticEvents(root: HTMLElement): void {
       state.message = `已选择起点：${edgeLabel(edge)}`;
     } else {
       state.selectedEndEdge = edge.id;
-      state.message = `已选择终点：${edgeLabel(edge)}，可在 Measurement 页新增 Tn`;
+      state.message = `已选择终点：${edgeLabel(edge)}，可在下方 Measurement 区新增 Tn`;
     }
-    state.activeTab = 'measure';
+    state.activeTab = 'gpio';
     render(root);
   });
   window.addEventListener('resize', () => draw(root));
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !state.modal) return;
+    state.modal = undefined;
+    render(root);
+  });
 }
 
 function render(root: HTMLElement): void {
@@ -406,6 +418,7 @@ function render(root: HTMLElement): void {
   renderWarnings(root);
   renderSocProfileControl(root);
   renderTimingControls(root);
+  renderModal(root);
   draw(root);
 }
 
@@ -640,9 +653,8 @@ function renderEdgeCursor(root: HTMLElement): void {
 function renderTabs(root: HTMLElement): void {
   const tabs = [
     ['level', 'Level Shifter', 'LS Hex'],
-    ['gpio', 'GPIO Timing', 'GPO 原生'],
+    ['gpio', 'GPIO Timing + Measure', 'GPO 原生 + 测量'],
     ['combin', 'Combin / Mask', '逻辑遮罩'],
-    ['measure', 'Measurement', '测量计算'],
   ];
   root.querySelector('#tabs')!.innerHTML = tabs
     .map(([id, label, sub]) => `<button class="${state.activeTab === id ? 'active' : ''}" data-tab="${id}"><span>${sub}</span>${label}</button>`)
@@ -661,7 +673,6 @@ function renderPanel(root: HTMLElement): void {
   if (state.activeTab === 'level') panel.innerHTML = levelPanel();
   if (state.activeTab === 'gpio') panel.innerHTML = gpioPanel();
   if (state.activeTab === 'combin') panel.innerHTML = combinPanel();
-  if (state.activeTab === 'measure') panel.innerHTML = measurementPanel();
   bindPanelEvents(root);
 }
 
@@ -1252,7 +1263,8 @@ function gpioPanel(): string {
   return `
     <h2>GPIO Timing Hex</h2>
     ${gpoSelector(gpos)}
-    ${selected ? entryTable(selected) : ''}`;
+    ${selected ? entryTable(selected) : ''}
+    ${measurementSection()}`;
 }
 
 function combinPanel(): string {
@@ -1288,26 +1300,36 @@ function formatCombinType(value: number): string {
   return COMBIN_TYPE_LABELS[value] ?? String(value);
 }
 
-function measurementPanel(): string {
+function measurementSection(): string {
   const edges = allSelectableEdges().slice(0, 3000);
   const nextRole = !state.selectedStartEdge || state.selectedEndEdge ? '起点' : '终点';
+  const results = state.project.simulation?.measurements ?? [];
   return `
-    <h2>Measurement / Calculator</h2>
-    <p class="hint">当前等待选择 ${nextRole}。Target 支持 3us / 300ns / 0.02ms / 445pcnt / 2lcnt；不写单位默认 us。</p>
-    <div class="measureControls">
-      <label>起点 edge ${edgeSelect('startEdge', edges, state.selectedStartEdge)}</label>
-      <label>终点 edge ${edgeSelect('endEdge', edges, state.selectedEndEdge)}</label>
-      <button id="addMeasurementBtn">新增 Tn</button>
-    </div>
-    <table><thead><tr><th>ID</th><th>起点</th><th>终点</th><th>实测</th><th>Target</th><th>当前-目标</th><th>操作</th></tr></thead><tbody>
-      ${(state.project.simulation?.measurements ?? []).map((m, index) => measurementRow(m, index)).join('')}
-    </tbody></table>`;
+    <section class="panelSection measureSection">
+      <div class="sectionHead">
+        <h3>Measurement / Calculator</h3>
+        <span class="sectionMeta">先点结果行选中，再点高亮 entry 的 PCNT：直接套用「当前-目标」差值</span>
+      </div>
+      <p class="hint">当前等待选择 ${nextRole}（在左侧波形上点边沿，或下面下拉选）。Target 支持 3us / 300ns / 0.02ms / 445pcnt / 2lcnt；不写单位默认 us。</p>
+      <div class="measureControls">
+        <label>起点 edge ${edgeSelect('startEdge', edges, state.selectedStartEdge)}</label>
+        <label>终点 edge ${edgeSelect('endEdge', edges, state.selectedEndEdge)}</label>
+        <button id="addMeasurementBtn">新增 Tn</button>
+      </div>
+      ${results.length === 0
+        ? '<p class="hint">还没有测量：在左侧波形上点两个边沿（起点 / 终点），再点「新增 Tn」。</p>'
+        : `<table><thead><tr><th>ID</th><th>起点</th><th>终点</th><th>实测</th><th>Target</th><th>当前-目标</th><th>操作</th></tr></thead><tbody>
+      ${results.map((m, index) => measurementRow(m, index)).join('')}
+    </tbody></table>`}
+    </section>`;
 }
 
 function measurementRow(m: NonNullable<DraftProject['simulation']>['measurements'][number], index: number): string {
   const source = state.project.measurements.find((item) => item.id === m.id);
-  return `<tr>
-    <td>${m.id}</td>
+  const active = state.activeMeasurementId === m.id;
+  const hint = active ? measurementTargetHint(m) : '';
+  return `<tr class="measureRow${active ? ' measureActive' : ''}" data-measure-row="${htmlAttr(m.id)}">
+    <td><b>${htmlText(m.id)}</b>${active ? '<small class="measurePick">已选中</small>' : ''}${hint ? `<small class="measureTarget">${htmlText(hint)}</small>` : ''}</td>
     <td>${edgeLabel(m.startEdge)}</td>
     <td>${edgeLabel(m.endEdge)}</td>
     <td>${formatMeasurementPcnt(m.deltaPcnt)}<br>${formatDuration(m.seconds)}</td>
@@ -1315,6 +1337,131 @@ function measurementRow(m: NonNullable<DraftProject['simulation']>['measurements
     <td>${formatTargetDelta(m)}</td>
     <td><button data-delete-measure="${index}">删除</button></td>
   </tr>`;
+}
+
+type MeasurementResult = NonNullable<DraftProject['simulation']>['measurements'][number];
+
+function activeMeasurement(): MeasurementResult | undefined {
+  const id = state.activeMeasurementId;
+  if (!id) return undefined;
+  return (state.project.simulation?.measurements ?? []).find((m) => m.id === id);
+}
+
+/** 选中某条测量结果：高亮该行，并把它两个边沿对应的 GPO entry 一起标出来，方便直接改 PCNT。 */
+function selectMeasurement(root: HTMLElement, id: string | undefined): void {
+  if (!id) return;
+  const next = state.activeMeasurementId === id ? undefined : id;
+  state.activeMeasurementId = next;
+  const active = activeMeasurement();
+  if (!active) {
+    state.message = '已取消测量选择';
+    render(root);
+    return;
+  }
+  const endTarget = active.endEdge ? draggableEdgeTarget(active.endEdge) : undefined;
+  const startTarget = active.startEdge ? draggableEdgeTarget(active.startEdge) : undefined;
+  const landed = endTarget ?? startTarget;
+  if (landed) state.selectedGpo = landed.gpo.index;
+  state.message = endTarget
+    ? `已选中 ${active.id}：点 ${endTarget.gpo.group} entry${endTarget.entry.index} 的 PCNT 即可按差值修正`
+    : `已选中 ${active.id}：这条测量的边沿不是可直接改的 GPO entry`;
+  render(root);
+}
+
+/** 这条测量的两个边沿分别落在哪个 GPO entry 上（终点套用 -差值、起点套用 +差值）。 */
+function measurementTargetHint(m: MeasurementResult): string {
+  const parts: string[] = [];
+  const endTarget = m.endEdge ? draggableEdgeTarget(m.endEdge) : undefined;
+  const startTarget = m.startEdge ? draggableEdgeTarget(m.startEdge) : undefined;
+  if (endTarget) parts.push(`终点 → ${endTarget.gpo.group} entry${endTarget.entry.index}（-差值）`);
+  if (startTarget) parts.push(`起点 → ${startTarget.gpo.group} entry${startTarget.entry.index}（+差值）`);
+  return parts.length > 0 ? parts.join('；') : '两个边沿都不是可改的 GPO entry，无法自动套用差值';
+}
+
+/** 这个 entry 是不是当前测量的差值落点。 */
+function measurementDeltaRole(gpo: GpoConfig, entryIndex: number): 'start' | 'end' | undefined {
+  const active = activeMeasurement();
+  if (!active) return undefined;
+  const endTarget = active.endEdge ? draggableEdgeTarget(active.endEdge) : undefined;
+  if (endTarget && endTarget.gpo.index === gpo.index && endTarget.entry.index === entryIndex) return 'end';
+  const startTarget = active.startEdge ? draggableEdgeTarget(active.startEdge) : undefined;
+  if (startTarget && startTarget.gpo.index === gpo.index && startTarget.entry.index === entryIndex) return 'start';
+  return undefined;
+}
+
+/**
+ * 点 PCNT 时套用测量差值：终点 entry 减差值、起点 entry 加差值。
+ * 结果越界（负数 / 超过 Vtotal / 超过 PCNT 限制 / by-line 被迫跨行）→ 弹窗提醒，不改数据。
+ */
+function applyMeasurementDelta(root: HTMLElement, input: HTMLInputElement): void {
+  const t = state.project.timing;
+  const gpo = selectedGpo();
+  const active = activeMeasurement();
+  if (!t || !gpo || !active) return;
+  const entry = gpo.entries.find((item) => item.index === Number(input.dataset.entry));
+  if (!entry) return;
+  if (active.errorPcnt === undefined) {
+    state.modal = {
+      title: '还差 Target',
+      body: `测量 ${htmlText(active.id)} 还没有有效 Target。<br/>先在这行的 Target 里填 3us / 445pcnt 这类目标值，才能算出「当前-目标」差值。`,
+    };
+    render(root);
+    return;
+  }
+  if (active.errorPcnt === 0) {
+    state.message = `${active.id} 实测已经等于 Target，不需要修正`;
+    render(root);
+    return;
+  }
+  const role = measurementDeltaRole(gpo, entry.index);
+  if (!role) return;
+  const delta = role === 'end' ? -active.errorPcnt : active.errorPcnt;
+  const before = { lcnt: entry.lcnt, pcnt: entry.pcnt };
+  const nextAbs = before.lcnt * t.pcntPerLine + before.pcnt + delta;
+  const violation = entryPositionViolation(gpo, entry, nextAbs, t);
+  if (violation) {
+    state.modal = { title: '违反点屏逻辑，已取消修改', body: `${violation}<br/><br/>差值 ${delta >= 0 ? '+' : ''}${delta}pcnt 没有写入，请重新设计方案。` };
+    render(root);
+    return;
+  }
+  const nextLcnt = Math.floor(nextAbs / t.pcntPerLine);
+  const nextPcnt = nextAbs % t.pcntPerLine;
+  if (nextLcnt === before.lcnt && nextPcnt === before.pcnt) {
+    state.message = '差值没有改变 entry 位置';
+    render(root);
+    return;
+  }
+  entry.lcnt = nextLcnt;
+  entry.pcnt = nextPcnt;
+  if (nextLcnt !== before.lcnt) addPatch(gpo, 'lcnt', entry.index, before.lcnt, nextLcnt);
+  if (nextPcnt !== before.pcnt) addPatch(gpo, 'pcnt', entry.index, before.pcnt, nextPcnt);
+  state.selectedGpo = gpo.index;
+  state.appliedEntryHint = { gpoIndex: gpo.index, entryIndex: entry.index, deltaPcnt: delta };
+  state.activeMeasurementId = undefined;
+  state.project.dirty = true;
+  recalc(root, {
+    preserveView: true,
+    successMessage: `已套用 ${active.id} 差值 ${delta >= 0 ? '+' : ''}${delta}pcnt：${gpo.group} entry${entry.index} PCNT ${formatCount4(before.pcnt)}→${formatCount4(nextPcnt)}、LCNT ${formatCount4(before.lcnt)}→${formatCount4(nextLcnt)}（现在第 ${nextLcnt} 行）`,
+  });
+}
+
+function entryPositionViolation(gpo: GpoConfig, entry: GpoConfig['entries'][number], nextAbs: number, t: TimingBase): string | undefined {
+  const label = `${gpo.group} entry${entry.index}`;
+  if (nextAbs < 0) {
+    return `${label} 套用差值后位置是负数（${nextAbs}pcnt），PCNT / LCNT 不能为负。`;
+  }
+  const nextLcnt = Math.floor(nextAbs / t.pcntPerLine);
+  const nextPcnt = nextAbs % t.pcntPerLine;
+  if (nextLcnt >= t.vtotal) {
+    return `${label} 套用差值后落到第 ${nextLcnt} 行，已经超过 Vtotal=${formatCount4(t.vtotal)}，加起来超出一帧。`;
+  }
+  if (nextPcnt > t.pcntMax) {
+    return `${label} 套用差值后 PCNT=${formatCount4(nextPcnt)} 超过当前限制 ${formatCount4(t.pcntMax)}（一行只有 ${formatCount4(t.pcntPerLine)}pcnt）。`;
+  }
+  if (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && nextLcnt !== entry.lcnt) {
+    return `${label} 是 by-line（Repeat_mode_SEL=0），差值会把 PCNT 推到第 ${nextLcnt} 行，但 by-line 不允许改 LCNT。`;
+  }
+  return undefined;
 }
 
 function edgeSelect(id: string, edges: Edge[], value?: string): string {
@@ -1346,20 +1493,37 @@ function gpoSelector(gpos: GpoConfig[]): string {
 }
 
 function entryTable(gpo: GpoConfig): string {
-  return `<table><thead><tr><th>entry</th><th>FCNT</th><th>EN</th><th>level</th><th>LCNT</th><th>PCNT</th><th>cell</th></tr></thead><tbody>
+  const active = activeMeasurement();
+  const targetHint = active ? measurementTargetHint(active) : '';
+  return `<table><thead><tr><th>entry</th><th>FCNT</th><th>EN</th><th>level</th><th>LCNT</th><th>PCNT</th><th>当前行 / cell</th></tr></thead><tbody>
     ${gpo.entries.map((e) => {
       const baseline = memoryEntry(gpo.index, e.index);
-      return `<tr>
-      <td>${e.index}</td>
+      const deltaRole = measurementDeltaRole(gpo, e.index);
+      const rowClass = deltaRole === 'end' ? 'entryDeltaRow entryDeltaEnd' : deltaRole === 'start' ? 'entryDeltaRow entryDeltaStart' : '';
+      return `<tr class="${rowClass}" data-entry-row="${e.index}">
+      <td>${e.index}${deltaRole ? `<small class="entryDeltaTag">${deltaRole === 'end' ? '套用 -差值' : '套用 +差值'}</small>` : ''}</td>
       <td class="${compareClass(baseline?.fcnt, e.fcnt)}"><input data-entry="${e.index}" data-entry-field="fcnt" value="0x${e.fcnt.toString(16).toUpperCase()}" />${compareHint(baseline?.fcnt, e.fcnt, formatHex)}</td>
       <td class="${compareClass(baseline?.enabled, e.enabled)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="enabled" type="number" min="0" max="1" value="${e.enabled ? 1 : 0}" />` : e.enabled ? '1' : '0'}${compareHint(baseline?.enabled, e.enabled, formatBool)}</td>
       <td class="${compareClass(baseline?.level, e.level)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="level" type="number" min="0" max="1" value="${e.level}" />` : e.level ? 'HIGH' : 'LOW'}${compareHint(baseline?.level, e.level, String)}</td>
       <td class="${compareClass(baseline?.lcnt, e.lcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="lcnt"`, e.lcnt, gpo.repeatMode === 0 && gpo.soc !== 'mt9603' ? 'disabled title="by-line 禁止修改 LCNT"' : '')}${compareHint(baseline?.lcnt, e.lcnt, formatCount4)}</td>
-      <td class="${compareClass(baseline?.pcnt, e.pcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="pcnt"`, e.pcnt)}${compareHint(baseline?.pcnt, e.pcnt, formatCount4)}</td>
-      <td>${e.cells.enable?.address ?? '-'} / ${e.cells.level?.address ?? '-'} / ${e.cells.fcnt?.address ?? '-'} / ${e.cells.lcnt?.address ?? '-'} / ${e.cells.pcnt?.address ?? '-'}</td>
+      <td class="${compareClass(baseline?.pcnt, e.pcnt)}">${countInput(`data-entry="${e.index}" data-entry-field="pcnt"${deltaRole ? ' class="pcntDeltaReady" data-delta-apply="1" title="套用测量差值"' : ''}`, e.pcnt)}${compareHint(baseline?.pcnt, e.pcnt, formatCount4)}</td>
+      <td class="entryLineCell" title="${htmlAttr(entryCellTitle(e))}">${entryLineHint(gpo, e)}</td>
     </tr>`;
     }).join('')}
-  </tbody></table>`;
+  </tbody></table>${targetHint ? `<p class="hint deltaHint">${htmlText(targetHint)}</p>` : ''}`;
+}
+
+/** LCNT / 增量见 cell 列：主显当前行，cell 地址放到 title 里。 */
+function entryLineHint(gpo: GpoConfig, entry: GpoConfig['entries'][number]): string {
+  const applied = state.appliedEntryHint;
+  const isApplied = Boolean(applied && applied.gpoIndex === gpo.index && applied.entryIndex === entry.index);
+  const frame = gpo.repeatMode === 1 && entry.frameCount > 0 ? `<small class="lineFrame">Frame ${formatCount4(entry.frameCount)}</small>` : '';
+  return `<b class="lineNow">L${formatCount4(entry.lcnt)}</b><small class="lineRow">第 ${entry.lcnt} 行</small>${frame}${isApplied && applied ? `<small class="lineApplied">${applied.deltaPcnt >= 0 ? '+' : ''}${applied.deltaPcnt}pcnt 已套用</small>` : ''}`;
+}
+
+function entryCellTitle(entry: GpoConfig['entries'][number]): string {
+  const cells = entry.cells;
+  return `cell  enable ${cells.enable?.address ?? '-'} / level ${cells.level?.address ?? '-'} / fcnt ${cells.fcnt?.address ?? '-'} / lcnt ${cells.lcnt?.address ?? '-'} / pcnt ${cells.pcnt?.address ?? '-'}`;
 }
 
 function memoryEntry(gpoIndex: number, entryIndex: number): GpoConfig['entries'][number] | undefined {
@@ -1493,9 +1657,22 @@ function bindPanelEvents(root: HTMLElement): void {
   });
   root.querySelector<HTMLSelectElement>('#gpoSelect')?.addEventListener('change', (event) => {
     state.selectedGpo = Number((event.currentTarget as HTMLSelectElement).value);
+    state.appliedEntryHint = undefined;
     render(root);
   });
-  root.querySelectorAll<HTMLInputElement>('[data-entry]').forEach((input) => input.addEventListener('change', () => updateEntry(root, input)));
+  root.querySelectorAll<HTMLInputElement>('[data-entry]').forEach((input) => {
+    input.addEventListener('change', () => updateEntry(root, input));
+    if (input.dataset.entryField === 'pcnt' && input.dataset.deltaApply === '1') {
+      input.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        applyMeasurementDelta(root, input);
+      });
+    }
+  });
+  root.querySelectorAll<HTMLTableRowElement>('[data-measure-row]').forEach((row) => row.addEventListener('click', (event) => {
+    if ((event.target as HTMLElement).closest('input, button, select')) return;
+    selectMeasurement(root, row.dataset.measureRow);
+  }));
   root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-gpo-field]').forEach((input) => input.addEventListener('change', () => updateGpoField(root, input)));
   root.querySelector<HTMLSelectElement>('#startEdge')?.addEventListener('change', (event) => { state.selectedStartEdge = (event.currentTarget as HTMLSelectElement).value; });
   root.querySelector<HTMLSelectElement>('#endEdge')?.addEventListener('change', (event) => { state.selectedEndEdge = (event.currentTarget as HTMLSelectElement).value; });
@@ -1851,6 +2028,7 @@ function addPatch(gpo: GpoConfig, field: 'enabled' | 'level' | 'fcnt' | 'lcnt' |
 
 function markDirty(root: HTMLElement, preserveView = true): void {
   state.project.dirty = true;
+  state.appliedEntryHint = undefined;
   state.message = '调试参数已修改，已实时刷新波形';
   if (state.project.timing) recalc(root, { preserveView, clearTransientCursors: true });
   else render(root);
@@ -2218,11 +2396,39 @@ function renderWarnings(root: HTMLElement): void {
   root.querySelector('#warnings')!.innerHTML = warnings.slice(0, 6).map((w) => `<div>${w}</div>`).join('');
 }
 
+/** 违反点屏逻辑的弹窗：只有越界才弹，正常套用差值不弹。 */
+function renderModal(root: HTMLElement): void {
+  const host = root.querySelector('#modalHost');
+  if (!host) return;
+  if (!state.modal) {
+    host.innerHTML = '';
+    return;
+  }
+  host.innerHTML = `
+    <div class="modalBackdrop">
+      <div class="modalCard" role="alertdialog" aria-live="assertive">
+        <h3>${htmlText(state.modal.title)}</h3>
+        <p>${state.modal.body}</p>
+        <div class="modalActions"><button id="modalCloseBtn">知道了</button></div>
+      </div>
+    </div>`;
+  host.querySelector('#modalCloseBtn')?.addEventListener('click', () => {
+    state.modal = undefined;
+    render(root);
+  });
+  host.querySelector<HTMLElement>('.modalBackdrop')?.addEventListener('click', (event) => {
+    if (event.target !== event.currentTarget) return;
+    state.modal = undefined;
+    render(root);
+  });
+}
+
 function draw(root: HTMLElement): void {
   const canvas = root.querySelector<HTMLCanvasElement>('#waveCanvas');
   if (!canvas) return;
   const pixelWidth = Math.max(1, Math.floor(canvas.getBoundingClientRect().width || 1));
   if (state.viewMode === 'frame120') requestFrame120Signals(root, pixelWidth);
+  const active = activeMeasurement();
   state.hitMap = drawWaveform(canvas, visibleSignalsForMode(), state.project.timing, state.view, {
     hoverEdgeId: state.hoverEdge?.id,
     cursorAt: state.snapEnabled ? undefined : state.cursorPoint?.at,
@@ -2230,8 +2436,8 @@ function draw(root: HTMLElement): void {
     dragPreviewAt: state.drag?.mode === 'edge' ? state.drag.previewAt : undefined,
     dragPreviewLabel: state.drag?.mode === 'edge' && state.project.timing ? `${state.drag.target.gpo.group} entry${state.drag.target.entry.index} ${formatPcnt(state.drag.previewAt, state.project.timing.pcntPerLine)}` : undefined,
     showPulseCount: state.viewMode === 'frame1' || state.viewMode === 'frame120',
-    selectedStartEdgeId: state.selectedStartEdge,
-    selectedEndEdgeId: state.selectedEndEdge,
+    selectedStartEdgeId: active?.startEdge?.id ?? state.selectedStartEdge,
+    selectedEndEdgeId: active?.endEdge?.id ?? state.selectedEndEdge,
   });
   canvas.classList.toggle('snap-ready', Boolean(state.hoverEdge));
   canvas.classList.toggle('snap-off', !state.snapEnabled);

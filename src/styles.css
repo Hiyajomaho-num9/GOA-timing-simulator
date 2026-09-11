@@ -417,3 +417,51 @@ td input:disabled { background: #111827; color: #6b7b95; }
   .sectionActions { justify-content: stretch; }
   .sectionActions button { width: 100%; }
 }
+
+/* Measurement 合并进 GPIO 页：结果行选中 + 差值套用 + 行提示 */
+.measureSection { margin-top: 12px; }
+.measureRow { cursor: pointer; }
+.measureRow:hover { background: rgba(143, 183, 198, 0.07); }
+.measureRow.measureActive { background: rgba(143, 183, 198, 0.16); box-shadow: inset 3px 0 0 var(--accent); }
+.measurePick,
+.measureTarget { display: block; margin-top: 4px; font: 10px/1.25 var(--mono); text-transform: none; letter-spacing: 0; }
+.measurePick { color: #ffd36b; }
+.measureTarget { color: var(--muted); }
+.deltaHint { margin: 8px 0 0; font: 11px/1.5 var(--mono); text-transform: none; letter-spacing: 0; }
+tr.entryDeltaRow { box-shadow: inset 3px 0 0 var(--accent-2); }
+tr.entryDeltaEnd { background: rgba(156, 175, 136, 0.13); }
+tr.entryDeltaStart { background: rgba(143, 183, 198, 0.09); }
+.entryDeltaTag { display: block; margin-top: 4px; color: #b9d3a0; font: 10px/1.25 var(--mono); text-transform: none; letter-spacing: 0; }
+input.pcntDeltaReady { border-color: rgba(156, 175, 136, 0.85); background: rgba(156, 175, 136, 0.12); box-shadow: inset 2px 0 0 rgba(156, 175, 136, 0.9); cursor: pointer; }
+.entryLineCell .lineNow { display: block; color: var(--ink); font: 700 13px/1.2 var(--mono); }
+.entryLineCell .lineRow,
+.entryLineCell .lineFrame,
+.entryLineCell .lineApplied { display: block; margin-top: 3px; font: 10px/1.2 var(--mono); text-transform: none; letter-spacing: 0; }
+.entryLineCell .lineRow { color: var(--dim); }
+.entryLineCell .lineFrame { color: var(--muted); }
+.entryLineCell .lineApplied { color: #b9d3a0; }
+
+/* 违反点屏逻辑弹窗 */
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(3, 6, 10, 0.72);
+  backdrop-filter: blur(3px);
+}
+.modalCard {
+  width: min(540px, 100%);
+  border: 1px solid var(--bad);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #141b23, #0c1219);
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+.modalCard h3 { margin: 0 0 8px; color: var(--bad); font-family: var(--serif); letter-spacing: -0.02em; }
+.modalCard p { margin: 0; color: var(--ink); font-size: 13px; line-height: 1.6; }
+.modalActions { display: flex; justify-content: flex-end; margin-top: 14px; }
+.modalActions button { min-width: 96px; }
