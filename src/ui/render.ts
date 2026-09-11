@@ -69,6 +69,8 @@ const state: {
   view?: WaveformView;
   referenceSignalId?: string;
   referenceEdgeId?: string;
+  /** 参考边沿来源：preset 自动设置还是用户手选。preset 自己设的参考边沿不允许跨 preset 残留。 */
+  referenceSource?: 'user' | 'preset';
   selectedStartEdge?: string;
   selectedEndEdge?: string;
   selectedGpo?: number;
@@ -270,12 +272,14 @@ function bindStaticEvents(root: HTMLElement): void {
     state.referenceSignalId = value || undefined;
     const signal = signalById(state.referenceSignalId);
     state.referenceEdgeId = signal?.edges[0]?.id;
+    state.referenceSource = value ? 'user' : undefined;
     if (!centerOnReference()) state.message = '参考波形没有可用边沿';
     render(root);
   });
   root.querySelector<HTMLSelectElement>('#referenceEdge')?.addEventListener('change', (event) => {
     const value = (event.currentTarget as HTMLSelectElement).value;
     state.referenceEdgeId = value || undefined;
+    state.referenceSource = value ? 'user' : undefined;
     if (!centerOnReference()) state.message = '参考边沿不可用';
     render(root);
   });
@@ -426,8 +430,7 @@ function loadWorkbook(root: HTMLElement, buffer: ArrayBuffer, fileName: string, 
   state.compareEnabled = false;
   state.memoryGpos = undefined;
   state.extraSignalIds = [];
-  state.referenceSignalId = undefined;
-  state.referenceEdgeId = undefined;
+  clearReference();
   state.selectedStartEdge = undefined;
   state.selectedEndEdge = undefined;
   state.selectedGpo = parsed.gpos.find((g) => /cpv1/i.test(g.group))?.index ?? parsed.gpos[0]?.index;
@@ -526,8 +529,7 @@ function renderTimebase(root: HTMLElement): void {
 function renderReferenceControls(root: HTMLElement): void {
   const signals = allSignals();
   if (state.referenceSignalId && !signals.some((signal) => signal.id === state.referenceSignalId)) {
-    state.referenceSignalId = undefined;
-    state.referenceEdgeId = undefined;
+    clearReference();
   }
 
   const signalSelect = root.querySelector<HTMLSelectElement>('#referenceSignal');
@@ -1401,8 +1403,7 @@ function bindPanelEvents(root: HTMLElement): void {
         : model === 'none'
           ? defaultNoLevelShifterConfig()
           : defaultLevelShifterConfig();
-    state.referenceSignalId = undefined;
-    state.referenceEdgeId = undefined;
+    clearReference();
     state.extraSignalIds = [];
     clearManualLevelInputLocks();
     markDirty(root);
@@ -1953,7 +1954,10 @@ function setDefaultView(kind: ViewMode): void {
   if (!t || !sim) return;
   state.viewMode = kind;
   applyDefaultReference(kind);
-  if (kind !== 'frame1' && kind !== 'frame120' && state.referenceSignalId && centerOnReference()) return;
+  // 「帧头」「帧尾」是固定窗口 preset：窗口始终由 preset 自己的锚点算出，
+  // 不套用参考边沿，否则上一次 preset 留下的参考边沿会把视图黏在帧尾。
+  const allowReferenceCenter = kind !== 'frame1' && kind !== 'frame120' && kind !== 'head' && kind !== 'tail';
+  if (allowReferenceCenter && state.referenceSignalId && centerOnReference()) return;
   const framePcnt = t.pcntPerLine * t.vtotal;
   if (kind === 'frame1') {
     state.view = { start: 0, end: framePcnt };
@@ -2001,12 +2005,23 @@ function defaultCenterCandidates(firstEdge: (token: string) => number | undefine
 
 function applyDefaultReference(kind: ViewMode): void {
   if (kind === 'tail') {
-    if (!setReferenceIfAvailable(['ls:clk1', 'ck1'], 'last')) clearReference();
+    if (!setReferenceIfAvailable(['ls:clk1', 'ck1'], 'last')) dropStalePresetReference();
     return;
   }
-  if (state.project.timing?.soc !== 'mt9603') return;
-  if (kind === 'debug') setReferenceIfAvailable(['cpv1:merge', 'cpv1:raw']);
-  if (kind === 'head') setReferenceIfAvailable(['stv:merge', 'stv:raw', 'ls:stv1']);
+  if (kind === 'head') {
+    if (!setReferenceIfAvailable(['stv:merge', 'stv:raw', 'ls:stv1'])) dropStalePresetReference();
+    return;
+  }
+  if (kind === 'debug') {
+    if (state.project.timing?.soc !== 'mt9603') {
+      dropStalePresetReference();
+      return;
+    }
+    if (!setReferenceIfAvailable(['cpv1:merge', 'cpv1:raw'])) dropStalePresetReference();
+    return;
+  }
+  // frame1 / frame120 用绝对整帧视图，不依赖参考边沿
+  dropStalePresetReference();
 }
 
 function setReferenceIfAvailable(ids: string[], edgePick: 'first' | 'last' = 'first'): boolean {
@@ -2014,12 +2029,20 @@ function setReferenceIfAvailable(ids: string[], edgePick: 'first' | 'last' = 'fi
   if (!signal) return false;
   state.referenceSignalId = signal.id;
   state.referenceEdgeId = edgePick === 'last' ? lastItem(signal.edges)?.id : signal.edges[0]?.id;
+  state.referenceSource = 'preset';
   return true;
+}
+
+// 丢掉上一次 preset 自己设下的参考边沿；用户手选的参考边沿保留。
+// 不清理的话，点过「帧尾」后点「帧头」会继续沿用帧尾的 CK1 末尾边沿，直接锁在帧尾。
+function dropStalePresetReference(): void {
+  if (state.referenceSource === 'preset') clearReference();
 }
 
 function clearReference(): void {
   state.referenceSignalId = undefined;
   state.referenceEdgeId = undefined;
+  state.referenceSource = undefined;
 }
 
 function firstDefined(values: Array<number | undefined>): number {
@@ -2725,8 +2748,7 @@ async function importLevelShifterJson(root: HTMLElement, input: HTMLInputElement
     if (!parsed) throw new Error('LS BIN 格式不对：需要 model=single-ek86707a / dual-ek86707a / single-iml7272b / single-ek86752b。');
     state.project.levelShifter = parsed;
     state.project.tpGenerator = parseTpGeneratorConfig(payload.tpGenerator);
-    state.referenceSignalId = undefined;
-    state.referenceEdgeId = undefined;
+    clearReference();
     state.extraSignalIds = [];
     state.manualEkInputKeys.clear();
     state.manualImlInputKeys.clear();
