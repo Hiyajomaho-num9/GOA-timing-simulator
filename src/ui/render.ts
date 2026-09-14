@@ -2922,10 +2922,8 @@ function formatTargetDelta(m: NonNullable<DraftProject['simulation']>['measureme
   const shortByTarget = m.errorSeconds < 0;
   const applyPcnt = -m.errorPcnt;
   const absPcnt = Math.abs(applyPcnt);
-  const lcnt = state.project.timing ? Math.trunc(absPcnt / state.project.timing.pcntPerLine) : 0;
-  const pcnt = state.project.timing ? absPcnt % state.project.timing.pcntPerLine : absPcnt;
   const raw = `实测 ${formatDuration(m.seconds)} − 目标 ${formatDuration(m.targetSeconds)} = ${formatDuration(m.errorSeconds)} = ${m.errorPcnt} pcnt；要补到 PCNT 上的修正量 = ${applyPcnt} pcnt`;
-  return `${shortByTarget ? '少' : '多'} ${formatDuration(Math.abs(m.errorSeconds))}<br><b class="deltaApplyAmount" title="${htmlAttr(raw)}">PCNT ${applyPcnt >= 0 ? '+' : '-'}${absPcnt}</b><small class="deltaApplyAmountNote">(${applyPcnt >= 0 ? '+' : '-'}${formatCount4(lcnt)}lcnt ${formatCount4(pcnt)}pcnt)</small>`;
+  return `${shortByTarget ? '少' : '多'} ${formatDuration(Math.abs(m.errorSeconds))}<br><b class="deltaApplyAmount" title="${htmlAttr(raw)}">PCNT ${applyPcnt >= 0 ? '+' : '-'}${absPcnt}</b>`;
 }
 
 function selectedReferenceEdge(): Edge | undefined {
