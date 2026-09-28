@@ -111,3 +111,10 @@ RST 没有可靠寄存器判定规则，MVP 必须由用户从 XLSX 原生 GPO �
 - 拖拽保持原 FCNT，不能通过 LCNT 隐式跨越 FCNT 指定的帧；跨帧调整需显式修改 FCNT。
 - 导入文件必须包含 `Panel` / `GPIO`、有效的 `PanelHTotal` / `PanelVTotal` 和可识别的 GPO entry，不再使用静默默认时序。
 - XLSX 导出保留被修改单元格的样式和其他属性；写入字面值时移除该单元格原公式，其他 ZIP 项保持原数据。
+
+## 按 tag 构建 Windows EXE
+
+将版本号同步到 `package.json`、`package-lock.json` 和 `neutralino.config.json` 后，推送对应的 `vX.Y.Z` tag。
+`Windows tag build` 会在 Windows runner 上执行检查，下载固定版本桌面运行时，构建并验证已嵌入前端资源的 x64 EXE。
+在对应 Actions run 的 Artifacts 中直接获取版本化 EXE；另有 SHA-256 校验文件和构建元数据 artifact，均保留 30 天。
+实机界面验证仍按 [Windows 验证清单](docs/windows-validation.md) 执行。
