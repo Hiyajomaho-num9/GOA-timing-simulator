@@ -15,7 +15,7 @@
 ## 运行
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -53,8 +53,8 @@ MT9216 使用绝对 PCNT 时间：
 
 - UI 保留 XLSX 原生结构：sheet / GPO / entry / 原始列名 / cell address。
 - 支持多个详细调参页：Level Shifter、GPIO Timing、Combin/Mask、Signal Mapping、Measurement/Calculator。
-- 修改参数后先进入 dirty draft。
-- 点击 `重新计算波形` 后统一校验并重新生成 raw/source/merge/CK 方波。
+- GPIO 参数通过统一校验后生成 patch，并即时重新计算 raw/source/merge/CK 方波。
+- 手动输入、拖拽和测量修正共用整数、范围、by-line / FCNT 帧边界校验；无效修改不写入。
 
 ## 信号规则
 
@@ -90,3 +90,24 @@ RST 没有可靠寄存器判定规则，MVP 必须由用户从 XLSX 原生 GPO �
 - Driver_TP / Init_TP entry 节点数量默认不允许改。
 - 修改后通过 patch diff 和 patched XLSX 导出。
 - patched XLSX 采用 cell 级 zip/xml 替换，不重新生成整份 workbook。
+
+## 开发与验证
+
+- Node.js：`^20.19.0 || >=22.12.0`；`.nvmrc` 使用 Node 22。
+- npm 10+；提交了完整锁文件，使用 `npm ci` 安装。`packageManager` 记录 npm 10.8.2。
+- `npm run typecheck`：检查应用与测试类型，同时阻止新增未使用的应用符号。
+- `npm test`：执行 `src` 下全部 `*.test.ts`，涵盖仿真、编辑、测量、Worker 客户端和 XLSX 导出回读。
+- `npm run check`：统一运行类型检查、测试和生产构建。GitHub Actions 在 Linux Node 20/22/24 上运行相同检查。
+- XLSX 使用 SheetJS 官方文档提供的 0.20.3 发布包，依赖及完整性摘要锁定在 `package-lock.json`；安装需要访问 `cdn.sheetjs.com`。
+- Windows 首次构建前运行 `npx neu update` 下载配置中固定版本的桌面运行时，再运行 `npm run dist:win`。
+- [Windows 验证清单](docs/windows-validation.md)：本次修复的实机验收项。
+
+## 编辑与测量约定
+
+- 测量 ID 在同一项目内单调递增，删除后不复用。
+- `pcnt` / `lcnt` Target 随时间基准重新换算；`us` / `ms` 等时间单位保持物理时间不变。
+- 起点修正与终点修正方向相反；未绑定测量端点的 entry 明确按手动偏移处理，同时控制两个端点的 entry 不提供间隔修正。
+- 真实边沿消失时测量标记失效；手动选点继续保持绝对位置。
+- 拖拽保持原 FCNT，不能通过 LCNT 隐式跨越 FCNT 指定的帧；跨帧调整需显式修改 FCNT。
+- 导入文件必须包含 `Panel` / `GPIO`、有效的 `PanelHTotal` / `PanelVTotal` 和可识别的 GPO entry，不再使用静默默认时序。
+- XLSX 导出保留被修改单元格的样式和其他属性；写入字面值时移除该单元格原公式，其他 ZIP 项保持原数据。

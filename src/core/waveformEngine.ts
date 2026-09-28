@@ -95,7 +95,7 @@ export function createWaveformEngine(project: DraftProject): WaveformEngine {
   const resolvers = new Map<string, Resolver>();
   const namesById = new Map<string, string>();
 
-  for (const family of sim.families) registerFamily(family, resolvers, namesById);
+  for (const family of sim.families) registerFamily(family);
   for (const gpo of project.gpos) {
     register(`gpo:${gpo.index}:raw`, { kind: 'gpo', gpoIndex: gpo.index, useOut: false }, gpoLabel(gpo, 'raw'));
     register(`gpo:${gpo.index}:merge`, { kind: 'gpo', gpoIndex: gpo.index, useOut: true }, gpoLabel(gpo, 'out'));
@@ -117,7 +117,7 @@ export function createWaveformEngine(project: DraftProject): WaveformEngine {
     }
   }
 
-  function registerFamily(family: SignalFamily, map: Map<string, Resolver>, names: Map<string, string>): void {
+  function registerFamily(family: SignalFamily): void {
     if (family.rawGpo !== undefined) {
       register(`${family.id}:raw`, { kind: 'gpo', gpoIndex: family.rawGpo, useOut: false }, `${family.label} raw`);
       if (family.sourceGpo !== undefined) {
@@ -167,6 +167,10 @@ export function createWaveformEngine(project: DraftProject): WaveformEngine {
 
   function steadyFrameSegments(signalId: string, resolver: GpoResolver, start: number, end: number): Segment[] | undefined {
     if (start < frameTotal || end <= start) return undefined;
+    // Reusing frame zero is safe only when every input repeats on a frame boundary.
+    // Otherwise the GPO phase drifts between frames; use the period resolver below.
+    const period = periodSpecFor(resolver);
+    if (!period || frameTotal % period.cycleTotal !== 0) return undefined;
     const frame = Math.floor(start / frameTotal);
     if (Math.floor((end - 1) / frameTotal) !== frame) return undefined;
     const transient = transientPcntFor(resolver);
@@ -277,8 +281,7 @@ export function createWaveformEngine(project: DraftProject): WaveformEngine {
 
     summarizeSignal(signalId: string, startPcnt: number, endPcnt: number): SignalSummary {
       const gpo = gpoForSignal(signalId);
-      // by-frame: derive W/T from gpo.entries + timing — window-agnostic (mirrors
-      // render.ts pulseSummary by-frame branch).
+      // by-frame: derive W/T from gpo.entries + timing — independent of the visible window.
       if (gpo?.repeatMode === 1) return summarizeByFrame(signalId, gpo, timing, frameTotal);
       const resolver = resolvers.get(signalId);
       if (resolver?.kind === 'cached' && resolver.repeatFrame) return summarizeFromSegments(signalId, resolver.trace.segments, timing);
@@ -503,7 +506,7 @@ function summarizeByFrame(signalId: string, gpo: GpoConfig, timing: TimingBase, 
     .filter((e) => e.at >= 0 && e.at < periodTotal)
     .sort((a, b) => a.at - b.at);
   if (events.length === 0) return { signalId, pulseCount: 0 };
-  // Mirrors render.ts pulseSummary by-frame branch: rising = level 1 whose
+  // A rising event is level 1 whose
   // circular predecessor is level 0.
   const len = events.length;
   let rising: { at: number; level: 0 | 1 } | undefined;

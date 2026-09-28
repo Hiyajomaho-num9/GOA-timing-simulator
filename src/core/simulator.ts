@@ -1,6 +1,8 @@
 import { defaultTpGeneratorConfig, ek86707aSet1OutputCount } from './types';
-import type { CombinType, DraftProject, Edge, DualEk86707aConfig, Ek86707aConfig, Ek86707aCommonConfig, Ek86752bConfig, GpoConfig, Iml7272bConfig, LogicLevel, Measurement, MeasurementResult, Segment, SignalFamily, SignalTrace, SimulationResult, TerCpv2Inference, TimingBase, TpGeneratorConfig } from './types';
+import type { CombinType, DraftProject, Edge, DualEk86707aConfig, Ek86707aConfig, Ek86707aCommonConfig, Ek86752bConfig, GpoConfig, Iml7272bConfig, LogicLevel, Segment, SignalFamily, SignalTrace, SimulationResult, TerCpv2Inference, TimingBase, TpGeneratorConfig } from './types';
 import { absPcnt, formatCount4 } from './time';
+import { resolveMeasurement } from './measurements';
+import { entryValidationErrors } from './entryEdits';
 
 const COLORS = [
   '#7fa6bd',
@@ -406,9 +408,6 @@ function detectFamilies(gpos: GpoConfig[]): SignalFamily[] {
     label,
     rawGpo: gpo?.index,
     sourceGpo: gpo && gpo.combinType !== 0 ? gpo.combinSel : namedSource?.index,
-    rawSignalId: gpo ? `gpo${gpo.index}:raw` : undefined,
-    sourceSignalId: gpo && gpo.combinType !== 0 ? `gpo${gpo.combinSel}:raw` : namedSource ? `gpo${namedSource.index}:raw` : undefined,
-    mergeSignalId: gpo ? `gpo${gpo.index}:merge` : undefined,
   });
   return [
     make('driver_tp', 'Driver_TP', driverRaw, driverSource),
@@ -1219,40 +1218,6 @@ function invertSegments(segments: Segment[]): Segment[] {
   return segments.map((segment) => ({ ...segment, level: invert(segment.level), source: `${segment.source ?? 'signal'}:invert` }));
 }
 
-function resolveMeasurement(measurement: Measurement, edges: Edge[], timing: TimingBase): MeasurementResult {
-  const startEdge = resolveMeasurementEdge(measurement.startEdgeId, measurement.startPoint, edges);
-  const endEdge = resolveMeasurementEdge(measurement.endEdgeId, measurement.endPoint, edges);
-  if (!startEdge || !endEdge) return { ...measurement, startEdge, endEdge };
-  const deltaPcnt = endEdge.at - startEdge.at;
-  const seconds = deltaPcnt * timing.pcntSeconds;
-  if (measurement.targetSeconds === undefined) return { ...measurement, startEdge, endEdge, deltaPcnt, seconds };
-  const errorSeconds = seconds - measurement.targetSeconds;
-  const errorPcnt = Math.round(errorSeconds / timing.pcntSeconds);
-  return {
-    ...measurement,
-    startEdge,
-    endEdge,
-    deltaPcnt,
-    seconds,
-    errorSeconds,
-    errorPcnt,
-    errorLcnt: Math.trunc(errorPcnt / timing.pcntPerLine),
-    errorRemainderPcnt: errorPcnt % timing.pcntPerLine,
-  };
-}
-
-function resolveMeasurementEdge(edgeId: string, snapshot: Edge | undefined, edges: Edge[]): Edge | undefined {
-  const exact = edges.find((edge) => edge.id === edgeId);
-  if (exact) return exact;
-  if (!snapshot) return undefined;
-  const candidates = edges.filter((edge) => (
-    edge.signalId === snapshot.signalId
-    && edge.edge === snapshot.edge
-    && edge.level === snapshot.level
-  ));
-  if (candidates.length === 0) return snapshot;
-  return candidates.reduce((best, edge) => (Math.abs(edge.at - snapshot.at) < Math.abs(best.at - snapshot.at) ? edge : best), candidates[0]);
-}
 
 function validateGpos(gpos: GpoConfig[], timing: TimingBase): string[] {
   const warnings: string[] = [];
@@ -1263,9 +1228,9 @@ function validateGpos(gpos: GpoConfig[], timing: TimingBase): string[] {
       if (end <= start) warnings.push(`${gpo.group}: mask gate end <= start，Region_VST/PST 与 Region_VEND/PEND 组合无有效窗口。`);
     }
     for (const entry of gpo.entries) {
-      if (entry.pcnt > timing.pcntMax) warnings.push(`${gpo.group} entry${entry.index}: PCNT=${formatCount4(entry.pcnt)} 超过 ${timing.soc === 'mt9603' ? 'MT9603 限制' : 'Htotal'}=${formatCount4(timing.pcntMax)}。`);
+      warnings.push(...entryValidationErrors(gpo, entry, timing));
       if (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && entry.lcnt !== 0) warnings.push(`${gpo.group} entry${entry.index}: Repeat_mode_SEL=0(by line)，LCNT=${formatCount4(entry.lcnt)} 不应作为调参目标。`);
-      if (gpo.repeatMode === 1 && entry.enabled && entry.frameCount > gpo.repeatCount) warnings.push(`${gpo.group} entry${entry.index}: Frame_cnt=${entry.frameCount} 超过 Repeat_Count_num=${gpo.repeatCount}。`);
+
     }
   }
   return warnings;

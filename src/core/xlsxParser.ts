@@ -8,29 +8,37 @@ const VALUE_COL_GPIO = 10;
 const VALUE_COL_PANEL = 3;
 export type SocProfileSelection = SocProfile | 'auto';
 
-async function parseXlsxFile(file: File, frameRate = 60, socProfile: SocProfileSelection = 'auto'): Promise<ParsedWorkbook> {
-  const buffer = await file.arrayBuffer();
-  return parseXlsxBuffer(buffer, file.name, frameRate, socProfile);
-}
-
 export function parseXlsxBuffer(buffer: ArrayBuffer, fileName: string, frameRate = 60, socProfile: SocProfileSelection = 'auto'): ParsedWorkbook {
+  if (!Number.isFinite(frameRate) || frameRate <= 0) throw new Error('frameRate 必须是正数。');
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: false });
+  for (const name of [PANEL_SHEET, GPIO_SHEET]) {
+    if (!workbook.Sheets[name]) throw new Error('XLSX 缺少必需工作表：' + name);
+  }
   const soc = socProfile === 'auto' ? detectSocProfile(workbook, fileName) : socProfile;
   const timing = parseTiming(workbook, frameRate, soc);
   const gpioRows = parseRows(workbook, GPIO_SHEET, VALUE_COL_GPIO);
   const gpos = buildGpos(gpioRows, soc);
+  if (!gpos.some(gpo => gpo.entries.length > 0)) throw new Error('GPIO 工作表没有可识别的 GPO entry。');
   return { workbook, fileName, soc, timing, gpioRows, gpos };
 }
 
 function parseTiming(workbook: XLSX.WorkBook, frameRate = 60, soc: SocProfile = 'mt9216') {
   const panelRows = parseRows(workbook, PANEL_SHEET, VALUE_COL_PANEL);
-  const htotalRegister = findNumeric(panelRows, 'PanelHTotal') ?? 2199;
-  const vtotal = findNumeric(panelRows, 'PanelVTotal') ?? 1126;
+  const htotalRegister = requiredCount(panelRows, 'PanelHTotal', soc === 'mt9603' ? 2 : 0);
+  const vtotal = requiredCount(panelRows, 'PanelVTotal', 1);
   const panelMinHtotal = findNumeric(panelRows, 'PanelMinHTotal');
   const panelMinVtotal = findNumeric(panelRows, 'PanelMinVTotal');
   const panelDclk = findNumeric(panelRows, 'PanelDCLK');
   const htotalArg = soc === 'mt9603' ? htotalRegister - 1 : htotalRegister;
   return makeTimingBase(htotalArg, vtotal, frameRate, { soc, panelMinHtotal, panelMinVtotal, panelDclk });
+}
+
+function requiredCount(rows: SheetRow[], name: string, minimum: number): number {
+  const value = findNumeric(rows, name);
+  if (value === undefined || !Number.isSafeInteger(value) || value < minimum) {
+    throw new Error('Panel 缺少有效 ' + name + '（必须是大于等于 ' + minimum + ' 的整数）。');
+  }
+  return value;
 }
 
 function parseRows(workbook: XLSX.WorkBook, sheetName: string, valueCol: number): SheetRow[] {

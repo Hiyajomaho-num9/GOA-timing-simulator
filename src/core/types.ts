@@ -114,9 +114,6 @@ export type SignalFamily = {
   label: string;
   rawGpo?: number;
   sourceGpo?: number;
-  mergeSignalId?: string;
-  rawSignalId?: string;
-  sourceSignalId?: string;
 };
 
 export type TerCpv2Inference = {
@@ -125,7 +122,6 @@ export type TerCpv2Inference = {
   message: string;
 };
 
-type LevelShifterModel = 'none' | 'single-ek86707a' | 'dual-ek86707a' | 'single-iml7272b' | 'single-ek86752b';
 export type SignalRef = string;
 export type EkSet1Level = 'high' | 'float' | 'gnd';
 
@@ -284,6 +280,7 @@ export type DraftProject = {
   rstGpo?: number;
   manualEdges?: Edge[];
   measurements: Measurement[];
+  nextMeasurementNumber?: number;
   patches: PatchItem[];
   dirty: boolean;
   simulation?: SimulationResult;

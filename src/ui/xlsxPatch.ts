@@ -1,153 +1,148 @@
-// XLSX patched-export: cell-level zip/xml replacement.
-//
-// Extracted from render.ts as a self-contained pure module. Operates on the
-// original .xlsx ArrayBuffer and a list of PatchItem, rewrites only the
-// touched <c> cells inside each sheet XML, and re-zips. Does NOT regenerate
-// the whole workbook — this is what lets patched XLSX keep every other cell,
-// style and relationship intact.
+// Patch only the selected sheet ZIP entries; preserve cell attributes and unrelated ZIP members.
+import { DOMParser, XMLSerializer, type Document, type Element } from '@xmldom/xmldom';
 import { strFromU8, strToU8, unzipSync, zipSync, type Unzipped } from 'fflate';
 import type { DraftProject } from '../core/types';
 
+const REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const XML_NS = 'http://www.w3.org/XML/1998/namespace';
+
 export function patchXlsxZip(source: ArrayBuffer, patches: DraftProject['patches']): Uint8Array {
   const zip = unzipSync(new Uint8Array(source));
-  const sheetPaths = sheetXmlPaths(zip);
-  const grouped = new Map<string, DraftProject['patches']>();
+  const paths = sheetXmlPaths(zip);
+  const groups = new Map<string, DraftProject['patches']>();
   for (const patch of patches) {
-    if (patch.cell === '-') continue;
-    const list = grouped.get(patch.sheet) ?? [];
-    list.push(patch);
-    grouped.set(patch.sheet, list);
+    cellPosition(patch.cell);
+    if (typeof patch.newValue === 'number' && !Number.isFinite(patch.newValue)) throw new Error('不能导出非有限数值：' + patch.cell);
+    const group = groups.get(patch.sheet) ?? [];
+    group.push(patch);
+    groups.set(patch.sheet, group);
   }
-  for (const [sheetName, sheetPatches] of grouped) {
-    const path = sheetPaths.get(sheetName);
-    if (!path) throw new Error(`找不到 sheet XML：${sheetName}`);
-    const current = zip[path];
-    if (!current) throw new Error(`XLSX 内缺少 ${path}`);
-    let xml = strFromU8(current);
-    for (const patch of sheetPatches) {
-      xml = patchSheetCellXml(xml, patch.cell, patch.newValue);
+  for (const [name, group] of groups) {
+    const path = paths.get(name);
+    if (!path || !zip[path]) throw new Error('找不到 sheet XML：' + name);
+    const doc = parseXml(strFromU8(zip[path]), path);
+    const data = elements(doc, 'sheetData')[0];
+    if (!data) throw new Error('sheet XML 缺少 sheetData：' + name);
+    const rows = new Map(elements(data, 'row').map(row => [Number(row.getAttribute('r')), row]));
+    const cells = new Map(elements(data, 'c').map(cell => [(cell.getAttribute('r') ?? '').toUpperCase(), cell]));
+    for (const patch of group) {
+      const address = patch.cell.toUpperCase();
+      const pos = cellPosition(address);
+      let cell = cells.get(address);
+      if (!cell) {
+        let row = rows.get(pos.row);
+        if (!row) {
+          row = createElement(doc, data, 'row');
+          row.setAttribute('r', String(pos.row));
+          const next = elements(data, 'row').find(item => Number(item.getAttribute('r')) > pos.row);
+          data.insertBefore(row, next ?? null);
+          rows.set(pos.row, row);
+        }
+        cell = createElement(doc, row, 'c');
+        cell.setAttribute('r', address);
+        const next = elements(row, 'c').find(item => cellPosition(item.getAttribute('r') ?? '').col > pos.col);
+        row.insertBefore(cell, next ?? null);
+        cells.set(address, cell);
+        extendDimension(doc, address);
+      }
+      setCellValue(doc, cell, patch.newValue);
     }
-    zip[path] = strToU8(xml);
+    zip[path] = strToU8(new XMLSerializer().serializeToString(doc));
   }
   return zipSync(zip);
 }
 
+function parseXml(xml: string, name: string): Document {
+  if (/<!DOCTYPE/i.test(xml)) throw new Error('XLSX XML 不允许 DOCTYPE：' + name);
+  return new DOMParser({ onError: (_level, message) => { throw new Error(name + ': ' + message); } })
+    .parseFromString(xml, 'application/xml');
+}
+
+function elements(parent: Document | Element, localName: string): Element[] {
+  return Array.from(parent.getElementsByTagNameNS('*', localName));
+}
+
+function createElement(doc: Document, parent: Element, localName: string): Element {
+  return doc.createElementNS(parent.namespaceURI, parent.prefix ? parent.prefix + ':' + localName : localName);
+}
+
 function sheetXmlPaths(zip: Unzipped): Map<string, string> {
-  const workbookXml = zip['xl/workbook.xml'];
-  const relsXml = zip['xl/_rels/workbook.xml.rels'];
-  if (!workbookXml || !relsXml) throw new Error('XLSX 缺少 workbook.xml 或 workbook.xml.rels。');
-  const workbook = strFromU8(workbookXml);
-  const rels = strFromU8(relsXml);
-  const ridToTarget = new Map<string, string>();
-  for (const rel of allMatches(rels, /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bTarget="([^"]+)"[^>]*>/g)) {
-    ridToTarget.set(xmlDecode(rel[1]), xmlDecode(rel[2]));
+  if (!zip['xl/workbook.xml'] || !zip['xl/_rels/workbook.xml.rels']) throw new Error('XLSX 缺少 workbook.xml 或 workbook.xml.rels。');
+  const workbook = parseXml(strFromU8(zip['xl/workbook.xml']), 'workbook.xml');
+  const rels = parseXml(strFromU8(zip['xl/_rels/workbook.xml.rels']), 'workbook.xml.rels');
+  const targets = new Map<string, string>();
+  for (const rel of elements(rels, 'Relationship')) {
+    if (rel.getAttribute('TargetMode') === 'External') continue;
+    const id = rel.getAttribute('Id');
+    const target = rel.getAttribute('Target');
+    if (id && target) targets.set(id, normalizeTarget(target));
   }
   const result = new Map<string, string>();
-  for (const sheet of allMatches(workbook, /<sheet\b[^>]*\bname="([^"]+)"[^>]*\br:id="([^"]+)"[^>]*\/?>/g)) {
-    const name = xmlDecode(sheet[1]);
-    const rid = xmlDecode(sheet[2]);
-    const target = ridToTarget.get(rid);
-    if (!target) continue;
-    const normalized = target.startsWith('/') ? target.slice(1) : `xl/${target.replace(/^\.\//, '')}`;
-    result.set(name, normalized.replace(/\/+/g, '/'));
+  for (const sheet of elements(workbook, 'sheet')) {
+    const id = sheet.getAttributeNS(REL_NS, 'id') || sheet.getAttribute('r:id');
+    const name = sheet.getAttribute('name');
+    const target = id ? targets.get(id) : undefined;
+    if (name && target) result.set(name, target);
   }
   return result;
 }
 
-function patchSheetCellXml(xml: string, cell: string, value: string | number | null): string {
-  const escapedCell = escapeRegExp(cell);
-  const cellRe = new RegExp(`<c\\b[^>]*\\br="${escapedCell}"[^>]*(?:\\/>|>[\\s\\S]*?<\\/c>)`);
-  const match = xml.match(cellRe);
-  const cellXml = makeCellXml(cell, value);
-  if (!match) return insertCellXml(xml, cell, cellXml);
-  return xml.replace(cellRe, cellXml);
-}
-
-function makeCellXml(cell: string, value: string | number | null): string {
-  if (typeof value === 'number') return `<c r="${cell}"><v>${value}</v></c>`;
-  if (value === null || value === undefined) return `<c r="${cell}"/>`;
-  return `<c r="${cell}" t="inlineStr"><is><t>${xmlEncode(String(value))}</t></is></c>`;
-}
-
-function insertCellXml(xml: string, cell: string, cellXml: string): string {
-  const rowNumber = Number(cell.match(/\d+/)?.[0] ?? 0);
-  if (!rowNumber) throw new Error(`无效 cell 地址：${cell}`);
-  const rowRe = new RegExp(`(<row\\b[^>]*\\br="${rowNumber}"[^>]*>)([\\s\\S]*?)(<\\/row>)`);
-  const rowMatch = xml.match(rowRe);
-  if (!rowMatch) {
-    const selfClosingRowRe = new RegExp(`<row\\b[^>]*\\br="${rowNumber}"[^>]*\\/>`);
-    if (selfClosingRowRe.test(xml)) return xml.replace(selfClosingRowRe, (row) => row.replace(/\/>$/, `>${cellXml}</row>`));
-    return insertRowXml(xml, rowNumber, cellXml);
+function normalizeTarget(target: string): string {
+  const parts: string[] = [];
+  for (const part of (target.startsWith('/') ? target.slice(1) : 'xl/' + target).split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!parts.length) throw new Error('无效 XLSX 关系路径：' + target);
+      parts.pop();
+    } else parts.push(part);
   }
-  return xml.replace(rowRe, (_whole, open: string, body: string, close: string) => `${open}${insertCellInRow(body, cell, cellXml)}${close}`);
+  return parts.join('/');
 }
 
-function insertRowXml(xml: string, rowNumber: number, cellXml: string): string {
-  const sheetDataRe = /(<sheetData[^>]*>)([\s\S]*?)(<\/sheetData>)/;
-  const match = xml.match(sheetDataRe);
-  if (!match) throw new Error(`sheet XML 中找不到 sheetData，无法插入 row ${rowNumber}。`);
-  const body = match[2];
-  const rowXml = `<row r="${rowNumber}">${cellXml}</row>`;
-  const rows = allMatches(body, /<row\b[^>]*\br="(\d+)"[^>]*(?:\/>|>[\s\S]*?<\/row>)/g);
-  for (const row of rows) {
-    if (Number(row[1]) > rowNumber) {
-      const index = row.index ?? 0;
-      const nextBody = `${body.slice(0, index)}${rowXml}${body.slice(index)}`;
-      return xml.replace(sheetDataRe, `${match[1]}${nextBody}${match[3]}`);
-    }
+function setCellValue(doc: Document, cell: Element, value: string | number | null): void {
+  // Keep r/s/cm/vm and other attributes; replacing the value intentionally removes the old formula.
+  for (const node of Array.from(cell.childNodes)) {
+    if (node.nodeType === 1 && ['f', 'v', 'is'].includes((node as Element).localName ?? node.nodeName)) cell.removeChild(node);
   }
-  return xml.replace(sheetDataRe, `${match[1]}${body}${rowXml}${match[3]}`);
-}
-
-function insertCellInRow(rowBody: string, cell: string, cellXml: string): string {
-  const target = cellAddressOrder(cell);
-  const cells = allMatches(rowBody, /<c\b[^>]*\br="([^"]+)"[^>]*(?:\/>|>[\s\S]*?<\/c>)/g);
-  for (const existing of cells) {
-    if (cellAddressOrder(existing[1]) > target) {
-      const index = existing.index ?? 0;
-      return `${rowBody.slice(0, index)}${cellXml}${rowBody.slice(index)}`;
-    }
+  cell.removeAttribute('t');
+  if (value === null) return;
+  if (typeof value === 'number') {
+    const v = createElement(doc, cell, 'v');
+    v.appendChild(doc.createTextNode(String(value)));
+    cell.insertBefore(v, cell.firstChild);
+  } else {
+    cell.setAttribute('t', 'inlineStr');
+    const inline = createElement(doc, cell, 'is');
+    const text = createElement(doc, cell, 't');
+    if (value.trim() !== value) text.setAttributeNS(XML_NS, 'xml:space', 'preserve');
+    text.appendChild(doc.createTextNode(value));
+    inline.appendChild(text);
+    cell.insertBefore(inline, cell.firstChild);
   }
-  return `${rowBody}${cellXml}`;
 }
 
-function cellAddressOrder(cell: string): number {
-  const match = cell.match(/^([A-Z]+)(\d+)$/i);
-  if (!match) return Number.MAX_SAFE_INTEGER;
+function cellPosition(cell: string): { row: number; col: number } {
+  const match = /^([A-Z]+)([1-9][0-9]*)$/i.exec(cell);
+  if (!match) throw new Error('无效 cell 地址：' + cell);
   let col = 0;
   for (const ch of match[1].toUpperCase()) col = col * 26 + ch.charCodeAt(0) - 64;
-  return Number(match[2]) * 100000 + col;
+  const row = Number(match[2]);
+  if (col > 16384 || row > 1048576) throw new Error('cell 地址超过 XLSX 范围：' + cell);
+  return { row, col };
 }
 
-function allMatches(text: string, re: RegExp): RegExpExecArray[] {
-  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
-  const globalRe = new RegExp(re.source, flags);
-  const matches: RegExpExecArray[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = globalRe.exec(text))) {
-    matches.push(match);
-    if (match[0].length === 0) globalRe.lastIndex += 1;
-  }
-  return matches;
+function cellAddress(col: number, row: number): string {
+  let name = '';
+  for (let value = col; value > 0; value = Math.floor((value - 1) / 26)) name = String.fromCharCode(65 + (value - 1) % 26) + name;
+  return name + row;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function xmlEncode(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function xmlDecode(value: string): string {
-  return value
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&gt;/g, '>')
-    .replace(/&lt;/g, '<')
-    .replace(/&amp;/g, '&');
+function extendDimension(doc: Document, address: string): void {
+  const dimension = elements(doc, 'dimension')[0];
+  if (!dimension) return;
+  const refs = (dimension.getAttribute('ref') ?? address).split(':');
+  const points = [cellPosition(refs[0]), cellPosition(refs[1] ?? refs[0]), cellPosition(address)];
+  const start = cellAddress(Math.min(...points.map(p => p.col)), Math.min(...points.map(p => p.row)));
+  const end = cellAddress(Math.max(...points.map(p => p.col)), Math.max(...points.map(p => p.row)));
+  dimension.setAttribute('ref', start === end ? start : start + ':' + end);
 }

@@ -1,3 +1,7 @@
+import { applyGpoChange } from '../core/gpoEdits';
+import { applyEntryChanges, draggedEntryPosition, entryPositionError, offsetEntryPosition, type EntryChanges, type EntryField } from '../core/entryEdits';
+import { addMeasurement, measurementCorrection, parseTargetSeconds, type MeasurementEndpoint } from '../core/measurements';
+import { cloneModel } from '../core/clone';
 import { defaultDualEk86707aConfig, defaultEk86752bConfig, defaultIml7272bConfig, defaultLevelShifterConfig, defaultNoLevelShifterConfig, defaultTpGeneratorConfig, ek86707aSet1OutputCount, type DraftProject, type DualEk86707aConfig, type Edge, type Ek86707aConfig, type Ek86707aInputs, type Ek86752bConfig, type Ek86752bInputs, type EkSet1Level, type GpoConfig, type Iml7272bConfig, type LevelShifterConfig, type SignalTrace, type SocProfile, type TimingBase, type TpGeneratorConfig } from '../core/types';
 import { parseXlsxBuffer, type SocProfileSelection } from '../core/xlsxParser';
 import { simulateProject } from '../core/simulator';
@@ -25,7 +29,6 @@ type DraggableEdgeTarget = {
 const EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2', 'rst', 'pol'];
 const DUAL_EK_INPUT_KEYS: EkInputKey[] = ['driverTp', 'initTp', 'stv', 'cpv1', 'cpv2', 'ter', 'rst', 'pol'];
 const IML_INPUT_KEYS: ImlInputKey[] = ['stvIn1', 'stvIn2', 'clkIn1', 'clkIn2', 'lcIn', 'terminate'];
-const EK52_INPUT_KEYS: Ek52InputKey[] = ['stv1', 'stv2', 'reset', 'cpv1', 'cpv2', 'cpv3', 'cpv4', 'terminate', 'lcIn1', 'lcIn2'];
 const COMBIN_TYPE_LABELS = ['0: ORG', '1: AND', '2: OR', '3: XOR', '4: NOT', '5: Hi', '6: Low', '7: NA'];
 type InputRule = { ids?: string[]; patterns?: RegExp[] };
 const EK_INPUT_RULES: Record<EkInputKey, InputRule> = {
@@ -255,7 +258,7 @@ function bindStaticEvents(root: HTMLElement): void {
     render(root);
   });
   root.querySelector<HTMLButtonElement>('#storeMemoryBtn')?.addEventListener('click', () => {
-    state.memoryGpos = structuredCloneGpos(state.project.gpos);
+    state.memoryGpos = cloneModel(state.project.gpos);
     state.compareEnabled = true;
     state.message = `已存入 compare memory：${state.memoryGpos.length} 个 GPO`;
     render(root);
@@ -431,7 +434,7 @@ function loadWorkbook(root: HTMLElement, buffer: ArrayBuffer, fileName: string, 
   state.project = {
     parsed,
     timing: parsed.timing,
-    gpos: structuredCloneGpos(parsed.gpos),
+    gpos: cloneModel(parsed.gpos),
     levelShifter: currentLs,
     tpGenerator: currentTp,
     manualEdges: [],
@@ -581,14 +584,6 @@ function renderViewButtons(root: HTMLElement): void {
   root.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((button) => {
     button.classList.toggle('active', button.dataset.view === state.viewMode);
   });
-}
-
-function viewLabel(view: ViewMode): string {
-  if (view === 'debug') return 'TP ↔ CK';
-  if (view === 'head') return '帧头';
-  if (view === 'tail') return '帧尾';
-  if (view === 'frame1') return '1 frame';
-  return '120 frame';
 }
 
 function renderSnapControls(root: HTMLElement): void {
@@ -1334,7 +1329,7 @@ function measurementRow(m: NonNullable<DraftProject['simulation']>['measurements
   const active = state.activeMeasurementId === m.id;
   const hint = active ? measurementTargetHint(m) : '';
   return `<tr class="measureRow${active ? ' measureActive' : ''}" data-measure-row="${htmlAttr(m.id)}">
-    <td><b>${htmlText(m.id)}</b>${active ? '<small class="measurePick">已选中</small>' : ''}${hint ? `<small class="measureTarget">${htmlText(hint)}</small>` : ''}</td>
+    <td><b>${measurementIdentityHtml(m)}</b>${active ? '<small class="measurePick">已选中</small>' : ''}${hint ? `<small class="measureTarget">${htmlText(hint)}</small>` : ''}</td>
     <td>${edgeLabel(m.startEdge)}</td>
     <td>${edgeLabel(m.endEdge)}</td>
     <td>${formatMeasurementPcnt(m.deltaPcnt)}<br>${formatDuration(m.seconds)}</td>
@@ -1385,14 +1380,14 @@ function measurementTargetHint(m: MeasurementResult): string {
 }
 
 /** 这个 entry 是不是当前测量起点/终点边沿所在的 entry（只用于标一行提示）。 */
-function measurementEdgeRole(gpo: GpoConfig, entryIndex: number): 'start' | 'end' | undefined {
+function measurementEdgeRole(gpo: GpoConfig, entryIndex: number): MeasurementEndpoint {
   const active = activeMeasurement();
   if (!active) return undefined;
-  const endTarget = active.endEdge ? draggableEdgeTarget(active.endEdge) : undefined;
-  if (endTarget && endTarget.gpo.index === gpo.index && endTarget.entry.index === entryIndex) return 'end';
-  const startTarget = active.startEdge ? draggableEdgeTarget(active.startEdge) : undefined;
-  if (startTarget && startTarget.gpo.index === gpo.index && startTarget.entry.index === entryIndex) return 'start';
-  return undefined;
+  const end = active.endEdge ? draggableEdgeTarget(active.endEdge) : undefined;
+  const start = active.startEdge ? draggableEdgeTarget(active.startEdge) : undefined;
+  const isEnd = end?.gpo.index === gpo.index && end.entry.index === entryIndex;
+  const isStart = start?.gpo.index === gpo.index && start.entry.index === entryIndex;
+  return isEnd && isStart ? 'both' : isEnd ? 'end' : isStart ? 'start' : undefined;
 }
 
 function deltaPreviewKey(gpoIndex: number, entryIndex: number): string {
@@ -1400,20 +1395,17 @@ function deltaPreviewKey(gpoIndex: number, entryIndex: number): string {
 }
 
 /** 当前选中的测量 + 要补到 PCNT 上的修正量（= 目标 - 实测：少了就加、多了就减）。 */
-function armedDelta(): { measurement: MeasurementResult; deltaPcnt: number } | undefined {
+function armedDelta(gpo?: GpoConfig, entryIndex?: number): { measurement: MeasurementResult; deltaPcnt: number } | undefined {
   const measurement = activeMeasurement();
-  if (!measurement || measurement.errorPcnt === undefined) return undefined;
-  return { measurement, deltaPcnt: -measurement.errorPcnt };
+  if (!measurement) return undefined;
+  const role = gpo && entryIndex !== undefined ? measurementEdgeRole(gpo, entryIndex) : undefined;
+  const deltaPcnt = measurementCorrection(measurement, role);
+  return deltaPcnt === undefined ? undefined : { measurement, deltaPcnt };
 }
 
 /** PCNT 加差值后的位置（负数留给违反点屏逻辑的弹窗判断）。 */
 function entryPosition(entry: GpoConfig['entries'][number], deltaPcnt: number, t: TimingBase): { abs: number; lcnt: number; pcnt: number } {
-  const abs = entry.lcnt * t.pcntPerLine + entry.pcnt + deltaPcnt;
-  return {
-    abs,
-    lcnt: Math.floor(abs / t.pcntPerLine),
-    pcnt: abs % t.pcntPerLine,
-  };
+  return { abs: entry.lcnt * t.pcntPerLine + entry.pcnt + deltaPcnt, ...offsetEntryPosition(entry, deltaPcnt, t) };
 }
 
 /** 点 entry 的 PCNT 后要显示的修正预览：结果 + 是否越界（越界时显示原始负数/大数更直观）。 */
@@ -1432,10 +1424,13 @@ function previewEntryDelta(root: HTMLElement, gpo: GpoConfig, entry: GpoConfig['
   const t = state.project.timing;
   const active = activeMeasurement();
   if (!t || !active) return;
-  if (active.errorPcnt === undefined) {
+  const armed = armedDelta(gpo, entry.index);
+  if (!armed) {
+    const invalid = !active.startEdge || !active.endEdge;
+    const both = measurementEdgeRole(gpo, entry.index) === 'both';
     state.modal = {
-      title: '还差 Target',
-      body: `测量 ${htmlText(active.id)} 还没有有效 Target。<br/>先在这行的 Target 里填 3us / 445pcnt 这类目标值，才能算出要补到 PCNT 上的修正量。`,
+      title: invalid ? '测量边沿已失效' : both ? '起点和终点由同一 entry 控制' : '还差 Target',
+      body: invalid ? '请重新选择有效的测量边沿。' : both ? '同时移动起点和终点不能修正测量间隔，请选择其他 entry。' : '请先填写有效 Target。',
     };
     render(root);
     return;
@@ -1443,12 +1438,10 @@ function previewEntryDelta(root: HTMLElement, gpo: GpoConfig, entry: GpoConfig['
   const key = deltaPreviewKey(gpo.index, entry.index);
   if (state.deltaPreviewKey === key) return;
   state.deltaPreviewKey = key;
-  const delta = -active.errorPcnt;
-  const preview = deltaPreview(gpo, entry, delta, t);
-  const deltaText = `${delta >= 0 ? '+' : '-'}${Math.abs(delta)}`;
-  state.message = preview.invalid
-    ? `${gpo.group} entry${entry.index}：PCNT ${formatCount4(entry.pcnt)} ${deltaText} = ${preview.shown}，越界（点了会被拦下）`
-    : `${gpo.group} entry${entry.index}：PCNT ${formatCount4(entry.pcnt)} ${deltaText} = ${preview.shown}，点 cell 列的 ${preview.shown} 写入`;
+  const preview = deltaPreview(gpo, entry, armed.deltaPcnt, t);
+  const role = measurementEdgeRole(gpo, entry.index);
+  const label = role === 'start' ? '起点反向修正' : role === 'end' ? '终点修正' : '手动偏移（未绑定测量端点）';
+  state.message = gpo.group + ' entry' + entry.index + '：' + label + ' ' + armed.deltaPcnt + 'pcnt → ' + preview.shown + (preview.invalid ? '，越界，不能写入' : '，点击结果写入');
   render(root);
 }
 
@@ -1456,56 +1449,32 @@ function applyPreviewedDelta(root: HTMLElement, gpoIndex: number, entryIndex: nu
   const t = state.project.timing;
   const gpo = state.project.gpos.find((item) => item.index === gpoIndex);
   const entry = gpo?.entries.find((item) => item.index === entryIndex);
-  const armed = armedDelta();
-  if (!t || !gpo || !entry || !armed) return;
+  if (!t || !gpo || !entry) return;
+  const armed = armedDelta(gpo, entryIndex);
+  if (!armed) return;
   const before = { lcnt: entry.lcnt, pcnt: entry.pcnt };
-  const next = entryPosition(entry, armed.deltaPcnt, t);
-  const violation = entryPositionViolation(gpo, entry, next.abs, t);
-  if (violation) {
-    state.modal = {
-      title: '违反点屏逻辑，已取消修改',
-      body: `${violation}<br/><br/>修正量 ${armed.deltaPcnt >= 0 ? '+' : ''}${armed.deltaPcnt}pcnt 没有写入，请重新设计方案。`,
-    };
+  const next = offsetEntryPosition(entry, armed.deltaPcnt, t);
+  try {
+    if (!applyEntryChanges(state.project, gpo, entry, next)) {
+      state.deltaPreviewKey = undefined;
+      state.message = '修正量没有改变 entry 位置';
+      render(root);
+      return;
+    }
+  } catch (error) {
+    state.modal = { title: '违反点屏逻辑，已取消修改', body: htmlText(error instanceof Error ? error.message : String(error)) };
     render(root);
     return;
   }
-  if (next.lcnt === before.lcnt && next.pcnt === before.pcnt) {
-    state.deltaPreviewKey = undefined;
-    state.message = '修正量没有改变 entry 位置';
-    render(root);
-    return;
-  }
-  entry.lcnt = next.lcnt;
-  entry.pcnt = next.pcnt;
-  if (next.lcnt !== before.lcnt) addPatch(gpo, 'lcnt', entry.index, before.lcnt, next.lcnt);
-  if (next.pcnt !== before.pcnt) addPatch(gpo, 'pcnt', entry.index, before.pcnt, next.pcnt);
   state.selectedGpo = gpo.index;
   state.appliedEntryHint = { gpoIndex, entryIndex, deltaPcnt: armed.deltaPcnt };
   state.deltaPreviewKey = undefined;
-  state.project.dirty = true;
-  recalc(root, {
-    preserveView: true,
-    successMessage: `已写入 ${armed.measurement.id} 修正量 ${armed.deltaPcnt >= 0 ? '+' : ''}${armed.deltaPcnt}pcnt：${gpo.group} entry${entry.index} PCNT ${formatCount4(before.pcnt)}→${formatCount4(next.pcnt)}、LCNT ${formatCount4(before.lcnt)}→${formatCount4(next.lcnt)}（现在第 ${next.lcnt} 行）`,
-  });
+  recalc(root, { preserveView: true, clearTransientCursors: true,
+    successMessage: '已写入 ' + armed.measurement.id + ' 修正量 ' + armed.deltaPcnt + 'pcnt：' + gpo.group + ' entry' + entry.index + ' PCNT ' + formatCount4(before.pcnt) + '→' + formatCount4(next.pcnt) + '、LCNT ' + formatCount4(before.lcnt) + '→' + formatCount4(next.lcnt) });
 }
 
 function entryPositionViolation(gpo: GpoConfig, entry: GpoConfig['entries'][number], nextAbs: number, t: TimingBase): string | undefined {
-  const label = `${gpo.group} entry${entry.index}`;
-  if (nextAbs < 0) {
-    return `${label} 套用修正量后位置是负数（${nextAbs}pcnt），PCNT / LCNT 不能为负。`;
-  }
-  const nextLcnt = Math.floor(nextAbs / t.pcntPerLine);
-  const nextPcnt = nextAbs % t.pcntPerLine;
-  if (nextLcnt >= t.vtotal) {
-    return `${label} 套用修正量后落到第 ${nextLcnt} 行，已经超过 Vtotal=${formatCount4(t.vtotal)}，加起来超出一帧。`;
-  }
-  if (nextPcnt > t.pcntMax) {
-    return `${label} 套用修正量后 PCNT=${formatCount4(nextPcnt)} 超过当前限制 ${formatCount4(t.pcntMax)}（一行只有 ${formatCount4(t.pcntPerLine)}pcnt）。`;
-  }
-  if (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && nextLcnt !== entry.lcnt) {
-    return `${label} 是 by-line（Repeat_mode_SEL=0），修正量会把 PCNT 推到第 ${nextLcnt} 行，但 by-line 不允许改 LCNT。`;
-  }
-  return undefined;
+  return entryPositionError(gpo, entry, { lcnt: Math.floor(nextAbs / t.pcntPerLine), pcnt: nextAbs % t.pcntPerLine }, t);
 }
 
 function edgeSelect(id: string, edges: Edge[], value?: string): string {
@@ -1546,7 +1515,7 @@ function entryTable(gpo: GpoConfig): string {
       const edgeRole = measurementEdgeRole(gpo, e.index);
       const rowClass = edgeRole === 'end' ? 'entryDeltaRow entryDeltaEnd' : edgeRole === 'start' ? 'entryDeltaRow entryDeltaStart' : '';
       return `<tr class="${rowClass}" data-entry-row="${e.index}">
-      <td>${e.index}${edgeRole ? `<small class="entryDeltaTag">${edgeRole === 'end' ? '终点边沿' : '起点边沿'}</small>` : ''}</td>
+      <td>${e.index}${edgeRole ? `<small class="entryDeltaTag">${edgeRole === 'both' ? '起点/终点边沿' : edgeRole === 'end' ? '终点边沿' : '起点边沿'}</small>` : ''}</td>
       <td class="${compareClass(baseline?.fcnt, e.fcnt)}"><input data-entry="${e.index}" data-entry-field="fcnt" value="0x${e.fcnt.toString(16).toUpperCase()}" />${compareHint(baseline?.fcnt, e.fcnt, formatHex)}</td>
       <td class="${compareClass(baseline?.enabled, e.enabled)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="enabled" type="number" min="0" max="1" value="${e.enabled ? 1 : 0}" />` : e.enabled ? '1' : '0'}${compareHint(baseline?.enabled, e.enabled, formatBool)}</td>
       <td class="${compareClass(baseline?.level, e.level)}">${gpo.entryEncoding === 'split-fields' ? `<input data-entry="${e.index}" data-entry-field="level" type="number" min="0" max="1" value="${e.level}" />` : e.level ? 'HIGH' : 'LOW'}${compareHint(baseline?.level, e.level, String)}</td>
@@ -1565,7 +1534,7 @@ function entryLineHint(gpo: GpoConfig, entry: GpoConfig['entries'][number]): str
   const frame = gpo.repeatMode === 1 && entry.frameCount > 0 ? `<small class="lineFrame">Frame ${formatCount4(entry.frameCount)}</small>` : '';
   const line = `<b class="lineNow">L${formatCount4(entry.lcnt)}</b><small class="lineRow">第 ${entry.lcnt} 行</small>${frame}`;
   if (state.deltaPreviewKey === deltaPreviewKey(gpo.index, entry.index)) {
-    const armed = armedDelta();
+    const armed = armedDelta(gpo, entry.index);
     const t = state.project.timing;
     if (armed && t) {
       const preview = deltaPreview(gpo, entry, armed.deltaPcnt, t);
@@ -1755,14 +1724,8 @@ function bindPanelEvents(root: HTMLElement): void {
     if (!state.selectedStartEdge || !state.selectedEndEdge) return;
     const startPoint = edgeById(state.selectedStartEdge);
     const endPoint = edgeById(state.selectedEndEdge);
-    const id = `T${state.project.measurements.length + 1}`;
-    state.project.measurements.push({
-      id,
-      startEdgeId: state.selectedStartEdge,
-      endEdgeId: state.selectedEndEdge,
-      startPoint: cloneMeasurementEdge(startPoint),
-      endPoint: cloneMeasurementEdge(endPoint),
-    });
+    if (!startPoint || !endPoint) return;
+    addMeasurement(state.project, startPoint, endPoint);
     recalc(root, { preserveView: true, clearTransientCursors: true });
   });
 }
@@ -1954,87 +1917,54 @@ function updateMeasurementField(root: HTMLElement, input: HTMLInputElement): voi
 
 function updateEntry(root: HTMLElement, input: HTMLInputElement): void {
   const gpo = selectedGpo();
-  if (!gpo) return;
-  const entry = gpo.entries.find((e) => e.index === Number(input.dataset.entry));
-  if (!entry) return;
-  const field = input.dataset.entryField as 'enabled' | 'level' | 'fcnt' | 'lcnt' | 'pcnt';
+  const entry = gpo?.entries.find((e) => e.index === Number(input.dataset.entry));
+  if (!gpo || !entry) return;
+  const field = input.dataset.entryField as EntryField;
+  if (!['enabled', 'level', 'fcnt', 'lcnt', 'pcnt'].includes(field)) return;
   const oldValue = entry[field];
-  const newValue = input.value.trim().toLowerCase().startsWith('0x') ? Number.parseInt(input.value, 16) : Number(input.value);
-  if (!Number.isFinite(newValue)) return;
-  if (field === 'pcnt' && state.project.timing && newValue > state.project.timing.pcntMax) {
-    alert(`PCNT=${formatCount4(newValue)} 超过当前限制=${formatCount4(state.project.timing.pcntMax)}`);
-    input.value = field === 'pcnt' || field === 'lcnt' ? formatCount4(Number(oldValue)) : String(oldValue);
-    return;
+  try {
+    const text = input.value.trim();
+    const value = Number(text);
+    if (!text || !Number.isSafeInteger(value) || value < 0) throw new Error('寄存器值必须是非负整数。');
+    if ((field === 'enabled' || field === 'level') && value !== 0 && value !== 1) throw new Error('EN / level 只能是 0 或 1。');
+    const changes: EntryChanges = {};
+    if (field === 'enabled') changes.enabled = value === 1;
+    else if (field === 'level') changes.level = value as 0 | 1;
+    else changes[field] = value;
+    if (applyEntryChanges(state.project, gpo, entry, changes)) markDirty(root);
+  } catch (error) {
+    input.value = field === 'fcnt' ? formatHex(Number(oldValue)) : String(typeof oldValue === 'boolean' ? Number(oldValue) : oldValue);
+    alert(error instanceof Error ? error.message : String(error));
   }
-  if (field === 'lcnt' && gpo.repeatMode === 0 && gpo.soc !== 'mt9603') {
-    alert('Repeat_mode_SEL=0(by line) 不允许修改 LCNT');
-    input.value = formatCount4(Number(oldValue));
-    return;
-  }
-  if (field === 'enabled') entry.enabled = newValue === 1;
-  else if (field === 'level') entry.level = newValue ? 1 : 0;
-  else entry[field] = newValue;
-  if (field === 'fcnt') {
-    if (gpo.entryEncoding === 'packed-fcnt') {
-      entry.enabled = Boolean(entry.fcnt & 0x8000);
-      entry.level = entry.fcnt & 0x4000 ? 1 : 0;
-      entry.frameCount = entry.fcnt & 0xff;
-    } else {
-      entry.frameCount = entry.fcnt;
-    }
-  }
-  addPatch(gpo, field, entry.index, oldValue, newValue);
-  markDirty(root);
 }
 
 function applyEdgeDragPatch(root: HTMLElement, drag: Extract<DragState, { mode: 'edge' }>): void {
   const t = state.project.timing;
   if (!t) return;
   const { gpo, entry } = drag.target;
-  const { nextLcnt, nextPcnt } = edgeDragNextPosition(drag);
-  const oldLcnt = entry.lcnt;
-  const oldPcnt = entry.pcnt;
-  if (nextPcnt > t.pcntMax) {
-    state.message = `拖动结果 PCNT=${formatCount4(nextPcnt)} 超过当前限制 ${formatCount4(t.pcntMax)}，未生成 patch`;
+  const next = draggedEntryPosition(gpo, entry, t, drag.previewAt, drag.target.periodStart);
+  try {
+    if (!applyEntryChanges(state.project, gpo, entry, next)) {
+      state.message = '拖动距离没有改变 entry 位置';
+      render(root);
+      return;
+    }
+  } catch (error) {
+    state.message = error instanceof Error ? error.message : String(error);
     render(root);
     return;
-  }
-  if (gpo.repeatMode === 0 && gpo.soc !== 'mt9603' && nextLcnt !== entry.lcnt) {
-    state.message = 'by-line 模式不允许通过拖拽修改 LCNT；请只在同一行内横向移动 PCNT';
-    render(root);
-    return;
-  }
-  if (nextLcnt === oldLcnt && nextPcnt === oldPcnt) {
-    state.message = '拖动距离没有改变 entry 位置';
-    render(root);
-    return;
-  }
-  if (nextLcnt !== oldLcnt) {
-    entry.lcnt = nextLcnt;
-    addPatch(gpo, 'lcnt', entry.index, oldLcnt, nextLcnt);
-  }
-  if (nextPcnt !== oldPcnt) {
-    entry.pcnt = nextPcnt;
-    addPatch(gpo, 'pcnt', entry.index, oldPcnt, nextPcnt);
   }
   state.selectedGpo = gpo.index;
   state.activeTab = 'gpio';
-  state.project.dirty = true;
-  recalc(root, {
-    preserveView: true,
-    clearTransientCursors: true,
-    successMessage: `已生成 patch suggestion：${edgePatchPath(drag.target)}；${formatPcnt(drag.originAt, t.pcntPerLine)} → ${formatPcnt(drag.previewAt, t.pcntPerLine)}。`,
-  });
+  recalc(root, { preserveView: true, clearTransientCursors: true,
+    successMessage: '已生成 patch suggestion：' + edgePatchPath(drag.target) + '；' + formatPcnt(drag.originAt, t.pcntPerLine) + ' → ' + formatPcnt(drag.previewAt, t.pcntPerLine) });
 }
 
 function edgeDragNextPosition(drag: Extract<DragState, { mode: 'edge' }>): { nextLcnt: number; nextPcnt: number } {
   const t = state.project.timing;
   if (!t) return { nextLcnt: drag.target.entry.lcnt, nextPcnt: drag.target.entry.pcnt };
-  const nextAbsInPeriod = Math.max(0, drag.previewAt - drag.target.periodStart);
-  return {
-    nextLcnt: Math.floor(nextAbsInPeriod / t.pcntPerLine),
-    nextPcnt: nextAbsInPeriod % t.pcntPerLine,
-  };
+  const next = draggedEntryPosition(drag.target.gpo, drag.target.entry, t, drag.previewAt, drag.target.periodStart);
+  return { nextLcnt: next.lcnt, nextPcnt: next.pcnt };
 }
 
 function edgeDragPreviewText(drag: Extract<DragState, { mode: 'edge' }>): string {
@@ -2054,45 +1984,18 @@ function edgePatchPath(target: DraggableEdgeTarget): string {
 }
 
 function updateGpoField(root: HTMLElement, input: HTMLInputElement | HTMLSelectElement): void {
-  const gpo = selectedGpo();
-  if (!gpo) return;
-  const key = input.dataset.gpoField as keyof GpoConfig;
-  const oldValue = gpo[key] as unknown;
-  const next = input instanceof HTMLInputElement && input.type === 'checkbox' ? input.checked : Number(input.value);
-  (gpo as unknown as Record<string, unknown>)[key] = next;
-  const cellName = gpoFieldCellName(gpo, String(key));
-  state.project.patches.push({ sheet: 'GPIO', cell: gpo.cells[cellName]?.address ?? '-', group: gpo.group, name: cellName, oldValue: patchCellValue(oldValue), newValue: patchCellValue(next) });
-  markDirty(root);
-}
-
-function patchCellValue(value: unknown): string | number | null {
-  if (typeof value === 'boolean') return value ? 1 : 0;
-  if (typeof value === 'number' || typeof value === 'string' || value === null) return value;
-  return null;
-}
-
-function gpoFieldCellName(gpo: GpoConfig, key: string): string {
-  const map: Record<string, string> = {
-    combinType: gpo.soc === 'mt9603' ? 'Logic_function' : 'Combin_Type_SEL',
-    combinSel: 'GPO_Combin_SEL',
-    repeatMode: 'Repeat_mode_SEL',
-    repeatCount: 'Repeat_Count_num',
-    maskEnabled: 'Mask_region_EN',
-    regionVst: 'Region_VST',
-    regionVend: 'Region_VEND',
-    regionPst: 'Region_pst',
-    regionPend: 'Region_pend',
-    regionOtherValue: 'Region_other_Value',
-  };
-  return map[key] ?? key;
-}
-
-function addPatch(gpo: GpoConfig, field: 'enabled' | 'level' | 'fcnt' | 'lcnt' | 'pcnt', entryIndex: number, oldValue: number | boolean, newValue: number): void {
-  const entry = gpo.entries.find((e) => e.index === entryIndex);
-  const cellKey = field === 'enabled' ? 'enable' : field;
-  const cell = entry?.cells[cellKey];
-  const normalizedOld = typeof oldValue === 'boolean' ? (oldValue ? 1 : 0) : oldValue;
-  state.project.patches.push({ sheet: 'GPIO', cell: cell?.address ?? '-', group: gpo.group, name: `entry${entryIndex}_${field.toUpperCase()}`, oldValue: normalizedOld, newValue });
+  const gpo = selectedGpo(); if (!gpo) return;
+  const key = input.dataset.gpoField ?? "";
+  const checkbox = input instanceof HTMLInputElement && input.type === "checkbox";
+  const oldValue = (gpo as unknown as Record<string, unknown>)[key];
+  try {
+    if (!checkbox && !input.value.trim()) throw new Error("寄存器值不能为空。");
+    const next = checkbox ? input.checked : Number(input.value);
+    if (applyGpoChange(state.project, gpo, key, next)) markDirty(root);
+  } catch (error) {
+    if (checkbox) input.checked = Boolean(oldValue); else input.value = String(oldValue);
+    alert(error instanceof Error ? error.message : String(error));
+  }
 }
 
 function markDirty(root: HTMLElement, preserveView = true): void {
@@ -2153,6 +2056,7 @@ function ensureWaveformWorker(root: HTMLElement): Promise<void> | undefined {
     }).catch((error) => {
       if (version !== state.waveformVersion) return;
       state.waveformWorkerFailed = true;
+      worker.dispose();
       state.waveformWorker = undefined;
       state.waveformWorkerInit = undefined;
       state.message = `Worker 初始化失败：${error instanceof Error ? error.message : String(error)}`;
@@ -2161,6 +2065,9 @@ function ensureWaveformWorker(root: HTMLElement): Promise<void> | undefined {
     return state.waveformWorkerInit;
   } catch (error) {
     state.waveformWorkerFailed = true;
+    state.waveformWorker?.dispose();
+    state.waveformWorker = undefined;
+    state.waveformWorkerInit = undefined;
     state.message = `Worker 初始化失败：${error instanceof Error ? error.message : String(error)}`;
     return undefined;
   }
@@ -2169,12 +2076,12 @@ function ensureWaveformWorker(root: HTMLElement): Promise<void> | undefined {
 function waveformWorkerProject(): DraftProject {
   return {
     timing: state.project.timing,
-    gpos: structuredCloneGpos(state.project.gpos),
-    levelShifter: structuredClone(state.project.levelShifter),
-    tpGenerator: state.project.tpGenerator ? structuredClone(state.project.tpGenerator) : undefined,
+    gpos: cloneModel(state.project.gpos),
+    levelShifter: cloneModel(state.project.levelShifter),
+    tpGenerator: state.project.tpGenerator ? cloneModel(state.project.tpGenerator) : undefined,
     rstGpo: state.project.rstGpo,
-    manualEdges: state.project.manualEdges ? structuredClone(state.project.manualEdges) : undefined,
-    measurements: structuredClone(state.project.measurements),
+    manualEdges: state.project.manualEdges ? cloneModel(state.project.manualEdges) : undefined,
+    measurements: cloneModel(state.project.measurements),
     patches: [],
     dirty: state.project.dirty,
   };
@@ -2185,6 +2092,7 @@ function refreshMeasurementSnapshots(): void {
   for (const result of results) {
     const measurement = state.project.measurements.find((item) => item.id === result.id);
     if (!measurement) continue;
+    measurement.targetSeconds = result.targetSeconds;
     if (result.startEdge) {
       measurement.startEdgeId = result.startEdge.id;
       measurement.startPoint = cloneMeasurementEdge(result.startEdge);
@@ -2301,10 +2209,6 @@ function lastItem<T>(items: T[]): T | undefined {
   return items.length > 0 ? items[items.length - 1] : undefined;
 }
 
-function isLevelShifterClockMode(): boolean {
-  return state.project.levelShifter.model === 'single-iml7272b' || state.project.levelShifter.model === 'single-ek86752b';
-}
-
 function findImlInputEdge(key: keyof Iml7272bConfig['inputs']): number | undefined {
   if (state.project.levelShifter.model !== 'single-iml7272b') return undefined;
   return signalById(state.project.levelShifter.inputs[key])?.edges[0]?.at;
@@ -2397,7 +2301,7 @@ function nearestEdge(root: HTMLElement, x: number, y: number, radius = 8): Edge 
 function workerNearestEdge(root: HTMLElement, x: number, y: number, radius: number): Edge | undefined {
   const hit = state.hitMap;
   const worker = state.waveformWorker;
-  if (state.viewMode !== 'frame120' || !hit || !worker || x < hit.plotLeft || x > hit.plotLeft + hit.plotWidth) return undefined;
+  if (state.waveformWorkerFailed || state.viewMode !== 'frame120' || !hit || !worker || x < hit.plotLeft || x > hit.plotLeft + hit.plotWidth) return undefined;
   const row = hit.rows.find((item) => y >= item.y1 && y <= item.y2);
   if (!row) return undefined;
   const span = hit.view.end - hit.view.start;
@@ -2702,6 +2606,7 @@ function frame120LoadingSignal(id: string): SignalTrace | undefined {
 }
 
 function requestFrame120Signals(root: HTMLElement, pixelWidth: number): void {
+  if (state.waveformWorkerFailed) return;
   const view = state.view;
   const t = state.project.timing;
   const worker = state.waveformWorker;
@@ -2726,7 +2631,11 @@ function requestFrame120Signals(root: HTMLElement, pixelWidth: number): void {
     state.waveformPendingKey = undefined;
     draw(root);
   }).catch((error) => {
-    if (version !== state.waveformVersion) return;
+    if (version !== state.waveformVersion || state.waveformPendingKey !== key) return;
+    state.waveformWorkerFailed = true;
+    worker.dispose();
+    state.waveformWorker = undefined;
+    state.waveformWorkerInit = undefined;
     state.waveformPendingKey = undefined;
     state.message = `Worker 查询失败：${error instanceof Error ? error.message : String(error)}`;
     render(root);
@@ -2780,32 +2689,6 @@ function edgesForSignal(base: SignalTrace, segments: SignalTrace['segments'], wi
     prevLevel = segment.level;
   }
   return edges;
-}
-
-function pulseSummary(segments: SignalTrace['segments'], timing: DraftProject['timing'], gpo?: GpoConfig): string {
-  if (!timing) return '';
-  const frameTotal = timing.pcntPerLine * timing.vtotal;
-  if (gpo?.repeatMode === 1) {
-    const entries = gpo.entries
-      .filter((entry) => entry.enabled)
-      .map((entry) => ({
-        at: entry.frameCount * frameTotal + entry.lcnt * timing.pcntPerLine + entry.pcnt,
-        level: entry.level,
-      }))
-      .sort((a, b) => a.at - b.at);
-    const period = Math.max(1, gpo.repeatCount + 1) * frameTotal;
-    const rising = entries.find((entry, index) => entry.level === 1 && entries[(index + entries.length - 1) % entries.length]?.level === 0);
-    if (rising) {
-      const falling = entries.find((entry) => entry.level === 0 && entry.at > rising.at) ?? entries.find((entry) => entry.level === 0);
-      const widthPcnt = falling ? (falling.at > rising.at ? falling.at - rising.at : period - rising.at + falling.at) : period;
-      return `W=${formatDuration(widthPcnt * timing.pcntSeconds)} T=${formatDuration(period * timing.pcntSeconds)}`;
-    }
-  }
-  const highs = segments.filter((segment) => segment.level === 1);
-  if (highs.length === 0) return 'W=0';
-  const firstWidth = (highs[0].end - highs[0].start) * timing.pcntSeconds;
-  const period = highs.length > 1 ? (highs[1].start - highs[0].start) * timing.pcntSeconds : undefined;
-  return `W=${formatDuration(firstWidth)}${period ? ` T=${formatDuration(period)}` : ''}`;
 }
 
 function orderedSignals(signals: SignalTrace[]): SignalTrace[] {
@@ -2869,23 +2752,6 @@ function allSelectableEdges(): Edge[] {
   return [...(state.project.manualEdges ?? []), ...visibleSignalsForMode().flatMap((signal) => signal.edges)];
 }
 
-function parseTargetSeconds(value: string | undefined, timing: DraftProject['timing']): number | undefined {
-  const text = String(value ?? '').trim().toLowerCase();
-  if (!text) return undefined;
-  const match = text.match(/^(-?\d+(?:\.\d+)?)\s*(ns|us|µs|ms|s|pcnt|lcnt)?$/);
-  if (!match) return undefined;
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount)) return undefined;
-  const unit = match[2] ?? 'us';
-  if (unit === 'ns') return amount * 1e-9;
-  if (unit === 'us' || unit === 'µs') return amount * 1e-6;
-  if (unit === 'ms') return amount * 1e-3;
-  if (unit === 's') return amount;
-  if (unit === 'pcnt') return timing ? amount * timing.pcntSeconds : undefined;
-  if (unit === 'lcnt') return timing ? amount * timing.lcntSeconds : undefined;
-  return undefined;
-}
-
 function formatTargetInput(seconds: number | undefined): string {
   if (seconds === undefined) return '';
   return `${(seconds * 1e6).toFixed(3)}us`;
@@ -2939,10 +2805,6 @@ function selectedReferenceEdge(): Edge | undefined {
 
 function selectedGpo(): GpoConfig | undefined {
   return state.project.gpos.find((g) => g.index === state.selectedGpo) ?? state.project.gpos[0];
-}
-
-function structuredCloneGpos(gpos: GpoConfig[]): GpoConfig[] {
-  return JSON.parse(JSON.stringify(gpos)) as GpoConfig[];
 }
 
 function countMemoryDiffs(): number {
@@ -3221,4 +3083,8 @@ function htmlText(value: string): string {
 
 function htmlAttr(value: string): string {
   return htmlText(value).replace(/"/g, '&quot;');
+}
+
+function measurementIdentityHtml(m: MeasurementResult): string {
+  return htmlText(m.id) + (!m.startEdge || !m.endEdge ? '<small class="deltaApplyBad">边沿已失效</small>' : '');
 }

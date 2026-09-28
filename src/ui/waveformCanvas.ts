@@ -62,7 +62,7 @@ export function drawWaveform(
   ctx.fillRect(0, 0, width, height);
 
   if (!timing || !view || signals.length === 0) {
-    drawEmpty(ctx, width, height, '导入 XLSX 后直接调参，波形会实时刷新');
+    drawEmpty(ctx, height, '导入 XLSX 后直接调参，波形会实时刷新');
     return undefined;
   }
 
@@ -288,7 +288,7 @@ function drawMarkers(
   }
 }
 
-function drawEmpty(ctx: CanvasRenderingContext2D, width: number, height: number, message: string): void {
+function drawEmpty(ctx: CanvasRenderingContext2D, height: number, message: string): void {
   ctx.fillStyle = '#9fb2cf';
   ctx.font = '18px Georgia, serif';
   ctx.fillText(message, 32, Math.max(60, height / 2));

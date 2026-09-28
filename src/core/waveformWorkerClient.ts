@@ -13,6 +13,7 @@ type Pending = {
 
 export class WaveformWorkerClient {
   private nextId = 1;
+  private closedError?: Error;
   private pending = new Map<number, Pending>();
 
   constructor(private readonly worker: Worker) {
@@ -48,27 +49,32 @@ export class WaveformWorkerClient {
     });
   }
 
-  queryableSignalIds(): Promise<string[]> {
-    return this.send({ type: 'queryableSignalIds' }).then((response) => {
-      if (response.type !== 'queryableSignalIds') throw new Error('Unexpected waveform worker response');
-      return response.signalIds;
-    });
+  dispose(): void {
+    this.close(new Error('Waveform worker disposed'));
   }
 
-  dispose(): void {
+  private close(error: Error): void {
+    if (this.closedError) return;
+    this.closedError = error;
     this.worker.removeEventListener('message', this.onMessage);
     this.worker.removeEventListener('error', this.onError);
     this.worker.terminate();
-    this.rejectAll(new Error('Waveform worker disposed'));
+    this.rejectAll(error);
   }
 
   private send(body: WorkerRequestBody): Promise<OkResponse> {
+    if (this.closedError) return Promise.reject(this.closedError);
     const id = this.nextId;
     this.nextId += 1;
     const request = { ...body, id } as WaveformWorkerRequest;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage(request);
+      try {
+        this.worker.postMessage(request);
+      } catch (error) {
+        this.pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -82,7 +88,7 @@ export class WaveformWorkerClient {
   };
 
   private onError = (event: ErrorEvent): void => {
-    this.rejectAll(new Error(event.message || 'Waveform worker error'));
+    this.close(new Error(event.message || 'Waveform worker error'));
   };
 
   private rejectAll(error: Error): void {

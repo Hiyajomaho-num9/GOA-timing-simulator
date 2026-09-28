@@ -3,7 +3,11 @@
     "target": "ES2019",
     "useDefineForClassFields": true,
     "module": "ESNext",
-    "lib": ["ES2019", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2019",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "allowJs": false,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -13,8 +17,15 @@
     "moduleResolution": "Bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "noEmit": true
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
   },
-  "include": ["src"],
-  "exclude": ["src/**/__tests__/**", "src/prototypes/**"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/**/__tests__/**",
+    "src/prototypes/**"
+  ]
 }

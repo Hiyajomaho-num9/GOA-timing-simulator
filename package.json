@@ -1,6 +1,6 @@
 {
   "name": "goa-timing-simulator",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,16 +12,26 @@
     "preview": "vite preview --host 0.0.0.0",
     "build:web": "tsc && vite build",
     "dist:win": "npm run build:web && neu build --embed-resources --release",
-    "dist:lite": "npm run dist:win"
+    "dist:lite": "npm run dist:win",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "fflate": "^0.8.2",
-    "typescript": "latest",
-    "vite": "latest",
-    "xlsx": "latest"
+    "@xmldom/xmldom": "0.9.12",
+    "fflate": "0.8.3",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "description": "GOA timing waveform simulator",
   "devDependencies": {
-    "@neutralinojs/neu": "^11.7.1"
-  }
+    "@neutralinojs/neu": "11.7.2",
+    "@types/node": "24.12.4",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "vite": "8.3.1"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0",
+    "npm": ">=10"
+  },
+  "packageManager": "npm@10.8.2"
 }
