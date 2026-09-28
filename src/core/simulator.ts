@@ -492,7 +492,7 @@ function simulateEk86707aPreview(config: Ek86707aConfig, signals: SignalTrace[],
     return makeEkClockTraces(highs, count, total, note);
   }
 
-  const terminateAt = inference.role === 'TER' ? cki2Rises.find((at) => at > startAt) : undefined;
+  const terminateAt = (config.ocpSel !== '1' || inference.role === 'TER') ? cki2Rises.find((at) => at > startAt) : undefined;
   const risingEdges = cki1Rises.filter((at) => terminateAt === undefined || at < terminateAt);
   const fallingEdges = fallingTimesOf(cki1, total).filter((at) => at >= startAt && (terminateAt === undefined || at < terminateAt));
   const highs: Segment[][] = Array.from({ length: count }, () => []);

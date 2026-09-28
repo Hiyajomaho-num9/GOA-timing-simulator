@@ -13,11 +13,6 @@ release/
 # Rust build outputs
 engine-rs/target/
 
-# local agent / workflow state
-.agents/
-.codex/
-.trellis/
-
 # local datasets / panel vendor files / generated reports
 *.xlsx
 *.xls

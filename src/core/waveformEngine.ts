@@ -1,7 +1,6 @@
 // Query-based waveform engine.
 //
-// This module cuts the deep seam described in
-// .trellis/tasks/05-08-goa-timing-simulator-design/engine-rewrite-plan.md:
+// This module implements the query-based engine rewrite:
 // instead of the UI pulling the full 120-frame SignalTrace.segments/edges,
 // it asks this engine "what do I draw in this window", "which edge is nearest
 // this mouse position", and "summarize this signal over this range".

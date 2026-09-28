@@ -2265,7 +2265,7 @@ function applyDefaultReference(kind: ViewMode): void {
       dropStalePresetReference();
       return;
     }
-    if (!setReferenceIfAvailable(['cpv1:merge', 'cpv1:raw'])) dropStalePresetReference();
+    if (!setReferenceIfAvailable(['driver_tp:merge', 'driver_tp:raw'])) dropStalePresetReference();
     return;
   }
   // frame1 / frame120 用绝对整帧视图，不依赖参考边沿

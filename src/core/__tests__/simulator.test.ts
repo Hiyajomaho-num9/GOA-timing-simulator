@@ -230,6 +230,47 @@ test('simulateProject: TER/CPV2 inference — Repeat_mode_SEL=1 & OCP_SEL=1 -> E
   assert.equal(result.inference.severity, 'error');
 });
 
+test('single EK86707A: OCP_SEL!=1 treats mapped CPV2/TER pin as TER even when swapped XLSX names infer UNKNOWN', () => {
+  const cki = baseGpo({
+    index: 2,
+    group: 'GPO2_CPV2',
+    label: 'CPV2',
+    repeatMode: 1,
+    entries: [
+      entry(0, 0, 100, 1), entry(1, 0, 120, 0),
+      entry(2, 0, 200, 1), entry(3, 0, 220, 0),
+      entry(4, 0, 300, 1), entry(5, 0, 320, 0),
+    ],
+  });
+  const terNamedCpv1 = baseGpo({
+    index: 6,
+    group: 'GPO6_CPV1',
+    label: 'CPV1',
+    repeatMode: 0,
+    entries: [entry(0, 0, 250, 1), entry(1, 0, 260, 0)],
+  });
+  const project: DraftProject = {
+    timing,
+    gpos: [cki, terNamedCpv1],
+    levelShifter: {
+      ...defaultLevelShifterConfig(),
+      ocpSel: '0',
+      set2: true,
+      mode1: 'normal',
+      inputs: {
+        cpv1: 'gpo:2:merge',
+        cpv2: 'gpo:6:merge',
+      },
+    },
+    measurements: [],
+    patches: [],
+    dirty: false,
+  };
+  const result = simulateProject(project);
+  assert.equal(result.inference.role, 'UNKNOWN');
+  assert.equal(levelAt(result.signals.find((s) => s.id === 'ck3')!.segments, 305), 0);
+});
+
 test('simulateProject: validation warns on PCNT exceeding pcntMax', () => {
   const gpo = baseGpo({ repeatMode: 0, entries: [entry(0, 0, timing.pcntMax + 5, 1)] });
   const project: DraftProject = {
