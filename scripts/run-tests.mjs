@@ -8,11 +8,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function testsIn(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
     const file = path.join(dir, entry.name);
-    return entry.isDirectory() ? testsIn(file) : entry.name.endsWith('.test.ts') ? [file] : [];
+    return entry.isDirectory() ? testsIn(file) : /[.]test[.](?:ts|mjs)$/.test(entry.name) ? [file] : [];
   });
 }
-const files = testsIn(path.join(root, 'src')).sort();
-if (!files.length) throw new Error('No test files found under src.');
+const files = [...testsIn(path.join(root, 'src')), ...testsIn(path.join(root, 'scripts'))].sort();
+if (!files.length) throw new Error('No test files found under src or scripts.');
 const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=spec', ...files], {
   cwd: root, stdio: 'inherit',
 });

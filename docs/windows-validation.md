@@ -1,4 +1,4 @@
-# Windows 验证清单（0.4.9）
+# Windows 验证清单（0.4.10）
 
 本清单由 Windows 实机验证完成。Linux 自动化测试不能替代 WebView、鼠标交互和桌面打包验证。
 

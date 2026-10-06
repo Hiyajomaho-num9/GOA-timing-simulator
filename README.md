@@ -112,9 +112,11 @@ RST 没有可靠寄存器判定规则，MVP 必须由用户从 XLSX 原生 GPO �
 - 导入文件必须包含 `Panel` / `GPIO`、有效的 `PanelHTotal` / `PanelVTotal` 和可识别的 GPO entry，不再使用静默默认时序。
 - XLSX 导出保留被修改单元格的样式和其他属性；写入字面值时移除该单元格原公式，其他 ZIP 项保持原数据。
 
-## 按 tag 构建 Windows EXE
+## 按 tag 自动构建并发布 Windows EXE
 
 将版本号同步到 `package.json`、`package-lock.json` 和 `neutralino.config.json` 后，推送对应的 `vX.Y.Z` tag。
-`Windows tag build` 会在 Windows runner 上执行检查，下载固定版本桌面运行时，构建并验证已嵌入前端资源的 x64 EXE。
-在对应 Actions run 的 Artifacts 中直接获取版本化 EXE；另有 SHA-256 校验文件和构建元数据 artifact，均保留 30 天。
+`Windows tag build` 会在 GitHub 的 Windows runner 上执行检查，下载固定版本桌面运行时，构建并验证已嵌入前端资源的 x64 EXE。
+构建成功后，发布 job 会校验同一次 run 的产物，并在对应 tag 的 GitHub Release 中上传版本化 EXE、SHA-256 校验文件和构建元数据。全部附件上传成功后才发布 Release；正式版本由 GitHub 按版本规则标记 Latest，预发布版本不标记 Latest。
+从 [Releases](https://github.com/Hiyajomaho-num9/GOA-timing-simulator/releases) 下载正式产物。对应 Actions run 的 Artifacts 也保留同一份产物 30 天。
+发布使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需额外配置个人令牌；构建 job 只有读取权限，发布 job 才有 `contents: write`。手动从普通分支运行只构建，选择版本 tag 运行才发布。
 实机界面验证仍按 [Windows 验证清单](docs/windows-validation.md) 执行。
