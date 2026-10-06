@@ -76,6 +76,20 @@ export function publishGitHubRelease({ root = projectRoot, env = process.env, ru
     return JSON.parse(response[2]);
   }
 
+  function findListedRelease() {
+    let match = null;
+    for (let page = 1; ; page++) {
+      const releases = api('repos/' + repo + '/releases?per_page=100&page=' + page);
+      if (!Array.isArray(releases)) throw new Error('GitHub release list is invalid.');
+      for (const release of releases) {
+        if (release.tag_name !== tag) continue;
+        if (match) throw new Error('Multiple releases exist for the requested tag: ' + tag);
+        match = release;
+      }
+      if (releases.length < 100) return match;
+    }
+  }
+
   function assetsFor(release) {
     if (release.tag_name !== tag || !Number.isSafeInteger(release.id) || release.id <= 0 || typeof release.draft !== 'boolean' || !Array.isArray(release.assets)) {
       throw new Error('GitHub release does not match the requested tag.');
@@ -106,7 +120,8 @@ export function publishGitHubRelease({ root = projectRoot, env = process.env, ru
     }
   }
 
-  let release = api(endpoint, { allow404: true });
+  // The tag endpoint only returns published releases; drafts require the list API.
+  let release = api(endpoint, { allow404: true }) ?? findListedRelease();
   if (release && release.draft === false) {
     verifyFiles(release, true);
     if (release.prerelease !== prerelease) throw new Error('Published release prerelease status does not match its version.');
@@ -116,14 +131,17 @@ export function publishGitHubRelease({ root = projectRoot, env = process.env, ru
     const args = ['release', 'create', tag, '--repo', repo, '--draft', '--verify-tag', '--generate-notes', '--title', tag];
     if (prerelease) args.push('--prerelease');
     gh(args);
-    release = api(endpoint);
+    release = findListedRelease();
   }
-  if (release.tag_name !== tag || release.draft !== true) throw new Error('Release must be a draft before uploading assets.');
+  if (!release || release.tag_name !== tag || release.draft !== true || !Number.isSafeInteger(release.id) || release.id <= 0) {
+    throw new Error('Release must be a draft before uploading assets.');
+  }
+  const releaseEndpoint = 'repos/' + repo + '/releases/' + release.id;
   gh(['release', 'upload', tag, ...files.map(file => file.file), '--repo', repo, '--clobber']);
-  release = api(endpoint);
+  release = api(releaseEndpoint);
   if (release.draft !== true) throw new Error('Release stopped being a draft during upload.');
   verifyFiles(release, false);
-  const published = api('repos/' + repo + '/releases/' + release.id, {
+  const published = api(releaseEndpoint, {
     method: 'PATCH',
     body: { draft: false, prerelease, make_latest: prerelease ? 'false' : 'legacy' },
   });

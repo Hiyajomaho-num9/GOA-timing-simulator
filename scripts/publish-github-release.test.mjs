@@ -9,6 +9,7 @@ import { publishGitHubRelease } from './publish-github-release.mjs';
 const commit = 'a'.repeat(40);
 const digest = bytes => 'sha256:' + createHash('sha256').update(bytes).digest('hex');
 const response = (body, status = 200) => 'HTTP/2.0 ' + status + ' OK\r\nContent-Type: application/json\r\n\r\n' + JSON.stringify(body);
+const notFound = () => { throw Object.assign(new Error('not found'), { stdout: response({ message: 'Not Found' }, 404) }); };
 
 function fixture(t, version = '1.2.3') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'goa-release-'));
@@ -42,15 +43,23 @@ function commandMock(f, handle) {
   return { calls, publish: () => publishGitHubRelease({ root: f.root, env: f.env, run }) };
 }
 
-test('creates a draft, verifies uploaded assets, and publishes a stable version with semver Latest selection', t => {
+test('creates and finds a draft through the list API while its tag endpoint remains 404, then verifies assets before publishing', t => {
   const f = fixture(t);
-  let lookups = 0;
+  let created = false;
+  let uploaded = false;
   const mock = commandMock(f, (args, options) => {
-    if (args[0] === 'api' && args[1].includes('/releases/tags/')) {
-      if (lookups++ === 0) throw Object.assign(new Error('not found'), { stdout: response({ message: 'Not Found' }, 404) });
+    if (args[0] === 'api' && args[1].includes('/releases/tags/')) return notFound();
+    if (args[0] === 'api' && args[1].includes('/releases?')) return response(created ? [{ ...f.release, assets: [] }] : []);
+    if (args[0] === 'release') {
+      if (args[1] === 'create') created = true;
+      if (args[1] === 'upload') uploaded = true;
+      return '';
+    }
+    if (args[args.indexOf('--method') + 1] === 'GET') {
+      assert.equal(args[1], 'repos/owner/repository/releases/1');
+      assert.ok(uploaded);
       return response(f.release);
     }
-    if (args[0] === 'release') return '';
     assert.equal(args[args.indexOf('--method') + 1], 'PATCH');
     assert.deepEqual(JSON.parse(options.input), { draft: false, prerelease: false, make_latest: 'legacy' });
     assert.equal(args[args.indexOf('--input') + 1], '-');
@@ -64,11 +73,52 @@ test('creates a draft, verifies uploaded assets, and publishes a stable version 
   assert.deepEqual(upload.slice(3, 6), [f.name, f.name + '.sha256', 'build-info.json'].map(name => path.join(f.root, 'release', name)));
   assert.ok(upload.includes('--clobber'));
   assert.equal(mock.calls.at(-1).args[0], 'api');
+  assert.equal(mock.calls.filter(call => call.args[1].includes('/releases/tags/')).length, 1);
+  assert.equal(mock.calls.filter(call => call.args[1].includes('/releases?')).length, 2);
+});
+
+test('resumes an existing draft found on a later list page when the tag endpoint returns 404', t => {
+  const f = fixture(t);
+  const unrelated = Array.from({ length: 100 }, (_, index) => ({ id: index + 100, tag_name: 'v0.0.' + index, draft: false }));
+  const mock = commandMock(f, (args, options) => {
+    if (args[0] === 'api' && args[1].includes('/releases/tags/')) return notFound();
+    if (args[0] === 'api' && args[1].includes('/releases?')) {
+      return response(args[1].endsWith('page=1') ? unrelated : [{ ...f.release, assets: [] }]);
+    }
+    if (args[0] === 'release') {
+      assert.equal(args[1], 'upload');
+      return '';
+    }
+    if (args.includes('PATCH')) {
+      assert.deepEqual(JSON.parse(options.input), { draft: false, prerelease: false, make_latest: 'legacy' });
+      return response({ ...f.release, draft: false });
+    }
+    assert.equal(args[1], 'repos/owner/repository/releases/1');
+    return response(f.release);
+  });
+  assert.equal(mock.publish().status, 'published');
+  assert.ok(mock.calls.some(call => call.args[1] === 'repos/owner/repository/releases?per_page=100&page=2'));
+  assert.ok(!mock.calls.some(call => call.args[1] === 'create'));
+});
+
+test('duplicate tag releases on different list pages fail before any mutation', t => {
+  const f = fixture(t);
+  const firstPage = [f.release, ...Array.from({ length: 99 }, (_, index) => ({ id: index + 100, tag_name: 'v0.0.' + index }))];
+  const mock = commandMock(f, args => {
+    if (args[1].includes('/releases/tags/')) return notFound();
+    assert.ok(args[1].includes('/releases?'));
+    return response(args[1].endsWith('page=1') ? firstPage : [{ ...f.release, id: 2 }]);
+  });
+  assert.throws(mock.publish, /Multiple releases exist/);
+  assert.equal(mock.calls.length, 3);
+  assert.ok(mock.calls.every(call => call.args[0] === 'api' && call.args.includes('GET')));
 });
 
 test('upload failure leaves the existing draft unpublished', t => {
   const f = fixture(t);
   const mock = commandMock(f, args => {
+    if (args[0] === 'api' && args[1].includes('/releases/tags/')) return notFound();
+    if (args[0] === 'api' && args[1].includes('/releases?')) return response([f.release]);
     if (args[0] === 'api') return response(f.release);
     assert.equal(args[1], 'upload');
     throw new Error('upload failed');
@@ -80,7 +130,11 @@ test('upload failure leaves the existing draft unpublished', t => {
 test('uploaded asset digest mismatch leaves the draft unpublished', t => {
   const f = fixture(t);
   f.release.assets[0].digest = 'sha256:' + '0'.repeat(64);
-  const mock = commandMock(f, args => args[0] === 'api' ? response(f.release) : '');
+  const mock = commandMock(f, args => {
+    if (args[0] === 'api' && args[1].includes('/releases/tags/')) return notFound();
+    if (args[0] === 'api' && args[1].includes('/releases?')) return response([f.release]);
+    return args[0] === 'api' ? response(f.release) : '';
+  });
   assert.throws(mock.publish, /Release asset size or SHA256 differs/);
   assert.ok(!mock.calls.some(call => call.args.includes('PATCH')));
 });
@@ -142,12 +196,14 @@ test('tag commit mismatch is rejected before calling GitHub', t => {
 
 test('prerelease publication explicitly excludes Latest', t => {
   const f = fixture(t, '1.2.3-rc.1');
-  let lookups = 0;
+  let created = false;
   const mock = commandMock(f, (args, options) => {
-    if (args[0] === 'api' && args[1].includes('/releases/tags/') && lookups++ === 0) {
-      throw Object.assign(new Error('not found'), { stdout: response({ message: 'Not Found' }, 404) });
+    if (args[0] === 'api' && args[1].includes('/releases/tags/')) return notFound();
+    if (args[0] === 'api' && args[1].includes('/releases?')) return response(created ? [f.release] : []);
+    if (args[1] === 'create') {
+      assert.ok(args.includes('--prerelease'));
+      created = true;
     }
-    if (args[1] === 'create') assert.ok(args.includes('--prerelease'));
     if (args.includes('PATCH')) {
       assert.deepEqual(JSON.parse(options.input), { draft: false, prerelease: true, make_latest: 'false' });
       return response({ ...f.release, draft: false });
@@ -164,6 +220,16 @@ for (const status of [401, 403, 500]) {
     const mock = commandMock(f, () => { throw Object.assign(new Error('request failed'), { stdout: response({ message: 'Failure' }, status) }); });
     assert.throws(mock.publish, new RegExp('HTTP ' + status));
     assert.equal(mock.calls.length, 1);
+  });
+  test('HTTP ' + status + ' when listing drafts does not trigger release creation', t => {
+    const f = fixture(t);
+    const mock = commandMock(f, args => {
+      if (args[1].includes('/releases/tags/')) return notFound();
+      throw Object.assign(new Error('request failed'), { stdout: response({ message: 'Failure' }, status) });
+    });
+    assert.throws(mock.publish, new RegExp('HTTP ' + status));
+    assert.equal(mock.calls.length, 2);
+    assert.ok(mock.calls.every(call => call.args[0] === 'api' && call.args.includes('GET')));
   });
 }
 
