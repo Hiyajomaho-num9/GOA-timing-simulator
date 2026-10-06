@@ -58,9 +58,10 @@ export function publishGitHubRelease({ root = projectRoot, env = process.env, ru
   const endpoint = 'repos/' + repo + '/releases/tags/' + encodeURIComponent(tag);
   const gh = (args, input) => run('gh', args, { cwd: root, env, encoding: 'utf8', ...(input === undefined ? {} : { input }) });
 
-  function api(route, { method = 'GET', body, allow404 = false } = {}) {
+  function api(route, { method = 'GET', body, inputFile, allow404 = false } = {}) {
     const args = ['api', route, '--method', method, '--include', '--header', 'Accept: application/vnd.github+json', '--header', 'X-GitHub-Api-Version: 2022-11-28'];
     if (body !== undefined) args.push('--input', '-');
+    if (inputFile) args.push('--input', inputFile.file, '--header', 'Content-Type: application/octet-stream', '--header', 'Content-Length: ' + inputFile.size);
     let output;
     try {
       output = gh(args, body === undefined ? undefined : JSON.stringify(body));
@@ -73,7 +74,7 @@ export function publishGitHubRelease({ root = projectRoot, env = process.env, ru
     if (!response || Number(response[1]) < 200 || Number(response[1]) >= 300) {
       throw new Error('Unexpected GitHub API response for ' + route);
     }
-    return JSON.parse(response[2]);
+    return response[2].trim() ? JSON.parse(response[2]) : null;
   }
 
   function findListedRelease() {
@@ -127,17 +128,32 @@ export function publishGitHubRelease({ root = projectRoot, env = process.env, ru
     if (release.prerelease !== prerelease) throw new Error('Published release prerelease status does not match its version.');
     return { status: 'already-published', tag, url: release.html_url };
   }
-  if (!release) {
-    const args = ['release', 'create', tag, '--repo', repo, '--draft', '--verify-tag', '--generate-notes', '--title', tag];
-    if (prerelease) args.push('--prerelease');
-    gh(args);
-    release = findListedRelease();
+  const newlyCreated = !release;
+  if (newlyCreated) {
+    release = api('repos/' + repo + '/releases', {
+      method: 'POST',
+      body: { tag_name: tag, name: tag, target_commitish: metadata.commit, draft: true, prerelease, generate_release_notes: true },
+    });
   }
   if (!release || release.tag_name !== tag || release.draft !== true || !Number.isSafeInteger(release.id) || release.id <= 0) {
     throw new Error('Release must be a draft before uploading assets.');
   }
   const releaseEndpoint = 'repos/' + repo + '/releases/' + release.id;
-  gh(['release', 'upload', tag, ...files.map(file => file.file), '--repo', repo, '--clobber']);
+  if (!newlyCreated) release = api(releaseEndpoint);
+  if (release.tag_name !== tag || release.draft !== true || !Array.isArray(release.assets)) {
+    throw new Error('Release must remain a draft before replacing assets.');
+  }
+  for (const file of files) {
+    const matches = release.assets.filter(asset => asset.name === file.name);
+    if (matches.length > 1) throw new Error('Duplicate draft release asset: ' + file.name);
+    const existing = matches[0];
+    if (existing?.state === 'uploaded' && existing.size === file.size && existing.digest === file.digest) continue;
+    if (existing) {
+      if (!Number.isSafeInteger(existing.id) || existing.id <= 0) throw new Error('Draft release asset ID is invalid.');
+      api('repos/' + repo + '/releases/assets/' + existing.id, { method: 'DELETE' });
+    }
+    api('https://uploads.github.com/' + releaseEndpoint + '/assets?name=' + encodeURIComponent(file.name), { method: 'POST', inputFile: file });
+  }
   release = api(releaseEndpoint);
   if (release.draft !== true) throw new Error('Release stopped being a draft during upload.');
   verifyFiles(release, false);
